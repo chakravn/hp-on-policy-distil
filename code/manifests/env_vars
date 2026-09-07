@@ -1,0 +1,42 @@
+# Source before rendering manifests:  set -a && source manifests/env_vars && set +a
+# Then:  envsubst < manifests/teacher-vllm.yaml-template | kubectl --context "$CTX" apply -f -
+#
+# NOTE: the SageMaker notebook role has been granted EKS cluster-admin (AmazonEKSClusterAdminPolicy),
+# so it can create/delete cluster resources directly from the notebook (RUN_CLUSTER=True). To revoke:
+#   aws eks disassociate-access-policy --cluster-name <cluster_name> --region <region> \
+#     --principal-arn arn:aws:iam::<acct_id>:role/service-role/<role> \
+#     --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+
+# --- Cluster (instantstart: hp-cluster-onpolicy-distillation) ---
+export CTX=                             #EKS Cluster ARN
+export NAMESPACE=default
+export REGION=us-west-2
+export INSTANCE_TYPE=ml.g5.24xlarge     # 4x L4 24GB (also available: ml.g5.8xlarge, 1 GPU)
+export GPU_PER_NODE=1                    # student trainer GPUs on one node (bump + FSDP to scale)
+
+# --- Storage ---
+# FSx for Lustre (PVC fsx-claim, /fsx) is the HIGH-THROUGHPUT working store: HF cache, checkpoints,
+# metrics, rollouts. S3 (PVC s3-claim, /s3) is the model registry + code-sync target. Both PVCs are
+# mounted in the teacher and student pods; throughput-sensitive I/O goes to /fsx.
+export S3_BUCKET=                        # S3 Bucket
+export S3_CLAIM=s3-claim                 # /s3  — model registry + code
+export FSX_CLAIM=fsx-claim               # /fsx — high-throughput working store (Lustre)
+export HF_HOME=/fsx/hf_cache             # cache on FSx for throughput
+
+# --- Models (already on S3 as /s3/Qwen-Qwen3-*; the "/" in the HF id becomes "-") ---
+# For fastest cold starts, stage weights to /fsx and point these at /fsx/... (see LAUNCH.md).
+export TEACHER_MODEL=Qwen/Qwen3-4B      # vLLM serves this (download Qwen3-4B first); or HF id
+export TEACHER_MODEL_ID=Qwen/Qwen3-4B       # served-model-name / HF fallback
+export STUDENT_MODEL=Qwen/Qwen3-0.6B-Base    # already present; or Qwen/Qwen3-0.6B-Base from HF
+export CODE_DIR=/s3/opd/src                 # synced via: aws s3 sync src s3://$S3_BUCKET/opd/src
+
+# --- Images (already used on this cluster) ---
+export VLLM_IMAGE=vllm/vllm-openai:latest
+export TRAIN_IMAGE=vllm/vllm-openai:latest  # has torch+transformers+vllm; fine for the student loop
+
+# --- Teacher service address (in-cluster DNS) ---
+export TEACHER_URL=http://teacher-vllm.$NAMESPACE.svc.cluster.local:8000/v1
+
+# --- Run config ---
+export RUN_DIR=/fsx/opd/run1                # checkpoints + metrics on FSx (high throughput)
+export STEPS=200

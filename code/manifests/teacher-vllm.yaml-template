@@ -1,0 +1,75 @@
+# Teacher inference pool: a vLLM OpenAI-compatible server that scores student tokens
+# (echo-logprobs). Matches this cluster's existing self-managed inference pattern
+# (Deployment + ClusterIP Service, image vllm/vllm-openai:latest, model read from /s3).
+#
+# Create with an ADMIN context (the SageMaker notebook role can't create Deployments):
+#   set -a && source manifests/env_vars && set +a
+#   envsubst < manifests/teacher-vllm.yaml-template | kubectl --context "$CTX" apply -f -
+# Or launch it via the instantstart GUI / kiro-cli agent — see manifests/LAUNCH.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teacher-vllm
+  namespace: ${NAMESPACE}
+  labels: { app: teacher-vllm }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: teacher-vllm }
+  template:
+    metadata:
+      labels: { app: teacher-vllm }
+    spec:
+      nodeSelector:
+        node.kubernetes.io/instance-type: ${INSTANCE_TYPE}
+      tolerations:
+        - key: sagemaker.amazonaws.com/node-health-status
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: ${VLLM_IMAGE}
+          command: ["/bin/bash", "-c"]
+          # Serve Qwen3-4B from the S3 mount; --max-model-len must fit prompt+completion.
+          args:
+            - >
+              vllm serve ${TEACHER_MODEL}
+              --served-model-name ${TEACHER_MODEL_ID}
+              --tensor-parallel-size 1
+              --host 0.0.0.0 --port 8000
+              --gpu-memory-utilization 0.90
+              --max-model-len 4096
+          ports:
+            - { containerPort: 8000 }
+          env:
+            - { name: HF_HOME, value: "${HF_HOME}" }
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          readinessProbe:
+            httpGet: { path: /v1/models, port: 8000 }
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 90
+          volumeMounts:
+            - { name: fsx, mountPath: /fsx }   # HF cache (high throughput)
+            - { name: s3,  mountPath: /s3 }    # model registry
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - name: fsx
+          persistentVolumeClaim: { claimName: ${FSX_CLAIM} }
+        - name: s3
+          persistentVolumeClaim: { claimName: ${S3_CLAIM} }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 8Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teacher-vllm
+  namespace: ${NAMESPACE}
+spec:
+  type: ClusterIP
+  selector: { app: teacher-vllm }
+  ports:
+    - { name: http, port: 8000, targetPort: 8000 }

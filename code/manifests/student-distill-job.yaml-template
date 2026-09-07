@@ -1,0 +1,64 @@
+# Student training pool: runs the on-policy distillation loop and queries the teacher
+# Service across the cluster. This cluster has NO Kubeflow PyTorchJob CRD, so we use a
+# plain K8s Job (single GPU node). For fault-tolerant multi-node, launch instead through
+# the HyperPod Training Operator or a verl RayJob (KubeRay is installed here) — see LAUNCH.md.
+#
+# Create with an ADMIN context (the SageMaker notebook role can't create Jobs):
+#   set -a && source manifests/env_vars && set +a
+#   # sync code to S3 first so the pod can read it at /s3/opd/src :
+#   aws s3 sync src s3://${S3_BUCKET}/opd/src
+#   envsubst < manifests/student-distill-job.yaml-template | kubectl --context "$CTX" apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: opd-student
+  namespace: ${NAMESPACE}
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels: { app: opd-student }
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        node.kubernetes.io/instance-type: ${INSTANCE_TYPE}
+      tolerations:
+        - key: sagemaker.amazonaws.com/node-health-status
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: trainer
+          image: ${TRAIN_IMAGE}
+          env:
+            - { name: HF_HOME, value: "${HF_HOME}" }
+            - { name: CODE_DIR, value: "${CODE_DIR}" }
+            - { name: TEACHER_URL, value: "${TEACHER_URL}" }
+            - { name: TEACHER_MODEL, value: "${TEACHER_MODEL_ID}" }
+            - { name: STUDENT_MODEL, value: "${STUDENT_MODEL}" }
+            - { name: RUN_DIR, value: "${RUN_DIR}" }
+            - { name: STEPS, value: "${STEPS}" }
+            - { name: GPU_PER_NODE, value: "${GPU_PER_NODE}" }
+          command: ["/bin/bash", "-c"]
+          args:
+            - >
+              pip install -q "nvidia-nccl-cu13==2.29.7" "openai>=1.40" "datasets" &&
+              until python3 -c "import urllib.request; urllib.request.urlopen('${TEACHER_URL}/models')" 2>/dev/null; do
+                echo "waiting for teacher ${TEACHER_URL} ..."; sleep 10; done &&
+              cd ${CODE_DIR} &&
+              torchrun --nproc_per_node=${GPU_PER_NODE} train_distill.py
+              --teacher-url ${TEACHER_URL} --teacher-model ${TEACHER_MODEL}
+              --student-model ${STUDENT_MODEL} --steps ${STEPS} --output-dir ${RUN_DIR}
+          resources:
+            limits:
+              nvidia.com/gpu: ${GPU_PER_NODE}
+          volumeMounts:
+            - { name: fsx, mountPath: /fsx }   # HF cache + checkpoints + metrics (high throughput)
+            - { name: s3,  mountPath: /s3 }    # model registry + code
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - name: fsx
+          persistentVolumeClaim: { claimName: ${FSX_CLAIM} }
+        - name: s3
+          persistentVolumeClaim: { claimName: ${S3_CLAIM} }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 16Gi }
