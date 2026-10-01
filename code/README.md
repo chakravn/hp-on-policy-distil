@@ -5,8 +5,9 @@ Distil a **teacher** (`Qwen/Qwen3.5-9B`, bf16, one whole copy sharded over TP=2)
 rollouts with **dense, per-token feedback** (reverse KL to the teacher). No verifier, no reward
 model and no supervised warm-up. Everything runs on **one `ml.g5.24xlarge`** (4× A10G 24 GB).
 
-**Result** (all 1,319 GSM8K test problems, greedy): **52.0% → 64.7%** after 100 steps
-(z = +8.86 paired; 261 fixed vs. 94 broken), closing **29.8%** of the gap to the teacher's 94.5%.
+**Result** (all 1,319 GSM8K test problems, greedy): **52.0% → ~65%**, closing **~30%** of the gap to
+the teacher's 94.5%. Every run plateaus at 64–66% (best 65.8%, z = +9.54); with `LR=2e-5` the
+student gets there by step 25. Per-run configs and results are in [`experiments/`](experiments/).
 
 **Target cluster:** `hp-cluster-onpolicy-distillation` (instantstart) · EKS, `us-west-2`, ns
 `default`. Storage: **FSx `/fsx` (`fsx-claim`) = high-throughput working store** (HF cache,
@@ -97,7 +98,8 @@ not queue-bound.
 the 4-shot prompt (`TRAIN_FEWSHOT=EVAL_FEWSHOT=4`, enforced by preflight [7]) carries the answer
 format. Four settings turned out to be essential, each found by a failed run:
 
-- **`LR=1e-5`.** At 1e-4 the student collapsed into long non-answers within ~4 steps (capped
+- **`LR=2e-5`, `STEPS=50`.** It reaches the ~65% plateau by step 25; 1e-5 takes ~100 steps to the same
+  level, and more steps (200) do not raise it. At 1e-4 the student collapsed within ~4 steps (capped
   rollouts 9% → 50–70%).
 - **`ANSWER_SPAN_POLICY=mask`** — zero credit on the final-answer line and `<|im_end|>`. Those tokens
   carry the largest reverse KL (+0.54 vs. +0.33 for reasoning) because the teacher can tell when
@@ -111,7 +113,7 @@ student drifting toward longer answers *lowers* `teacher_kl` without learning. W
 `truncated_frac`, `completion_tokens_mean` and `answer_masked_rollouts`, and judge by the eval.
 
 Run the eval with `EVAL_PHASE=before,teacher` once first (~20 min) to measure the gap before a
-~9 h run.
+~4.5 h run.
 
 ## Contents
 ```
@@ -213,7 +215,7 @@ Memory` bills against node RAM and `/dev/shm` is charged **per pod**, so it mult
 `TEACHER_REPLICAS` — comfortable in the node's 384 GiB.
 
 **Wall clock.** A step (64 prompts × 4 rollouts) takes ~5.5 min on this node — ~50 s generation,
-~80 s teacher scoring, ~200 s training — so 100 steps is ~9 h. Every `SAVE_EVERY=25` steps writes an
+~80 s teacher scoring, ~200 s training — so the default 50 steps is ~4.5 h. Every `SAVE_EVERY=25` steps writes an
 independently evaluable adapter.
 
 **LoRA, with an fp32 adapter.** `PRECISION=lora` keeps the frozen base in bf16 and the trainable

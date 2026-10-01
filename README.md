@@ -3,8 +3,9 @@
 ![Workflow: code to eval dashboard](slides/workflow.png)
 
 Distils **Qwen3.5-9B** into **Qwen3.5-0.8B** on GSM8K with on-policy distillation and no supervised
-warm-up: the student goes from **52.0% to 64.7%** (all 1,319 test problems, greedy) in 100 steps,
-closing 29.8% of the gap to the teacher's 94.5%. A more detailed version of the diagram is in
+warm-up: the student goes from **52.0% to ~65%** (all 1,319 test problems, greedy), closing ~30% of
+the gap to the teacher's 94.5%; it reaches that plateau within 25–50 steps. Experiment history:
+[`code/experiments/`](code/experiments/). A more detailed version of the diagram is in
 [`slides/workflow-detailed.png`](slides/workflow-detailed.png).
 
 Deploy one CloudFormation template, open JupyterLab in SageMaker Studio, run
@@ -355,7 +356,7 @@ depending on your repository layout) and pick the **Python 3 (ipykernel)** kerne
 4. **Part 2 — Launch the sampler and the student.** Applies the `student-sampler` vLLM
    Deployment (GPU 3), syncs `src/` to `s3://$S3_BUCKET/opd/src` (the pod reads it at
    `/s3/opd/src`) and submits the `opd-student` Job (GPU 2), which runs `preflight.py` and then
-   `train_distill.py`: 100 steps of 64 prompts × 4 rollouts, ~9 h.
+   `train_distill.py`: 50 steps of 64 prompts × 4 rollouts, ~4.5 h.
 
 5. **Part 3 — Monitor.** Plots `teacher_kl`, capped rollouts and rollout length from
    `${RUN_DIR}/metrics_rank0.jsonl`; re-run the cells to refresh. Read `teacher_kl` together with

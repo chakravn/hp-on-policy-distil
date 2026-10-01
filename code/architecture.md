@@ -46,7 +46,7 @@ hardware are closed:
   accepts — kept as the fallback in `env_vars` if you need the spare GPU back.
 
 The teacher is also the accuracy **ceiling**: run `EVAL_PHASE=before,teacher` before committing
-to the ~9 h run (GSM8K: 0.8B 52.0% vs. 9B 94.5%).
+to the ~4.5 h run (GSM8K: 0.8B 52.0% vs. 9B 94.5%).
 
 **Cache arithmetic is hybrid-aware.** Qwen3.5 alternates 3 `linear_attention` layers to 1
 `full_attention`, so of 32 layers only 8 hold a growing KV cache (32 KiB/token) while 24 hold a

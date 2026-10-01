@@ -7,7 +7,8 @@
 #
 # Shipped configuration: on-policy distillation of Qwen3.5-0.8B (instruct) from Qwen3.5-9B on
 # GSM8K -- no supervised warm-up. Measured result (1,319 GSM8K test problems, greedy):
-#     base student 52.0%  ->  distilled 64.7% after 100 steps  (teacher 94.5%; 29.8% of the gap)
+#     base student 52.0%  ->  distilled ~65%  (teacher 94.5%; ~30% of the gap). Every run plateaus at
+#     64-66%; LR 2e-5 gets there by step 25. Per-run configs and results: experiments/
 #
 # NOTE: the SageMaker notebook role has been granted EKS cluster-admin (AmazonEKSClusterAdminPolicy),
 # so it can create/delete cluster resources directly from the notebook. To revoke:
@@ -118,7 +119,8 @@ export ENABLE_THINKING=0
 # the per-token reverse KL. Starts from the pristine student; there is no supervised warm-up.
 export INIT_ADAPTER=                          # empty = pristine student; a student-step<N> dir to resume
 export RUN_DIR=/fsx/opd/gsm8k-opd             # checkpoints + metrics; use a new dir per run
-export STEPS=100                              # ~5.5 min/step on this node => ~9 h
+export STEPS=50                               # ~5.5 min/step => ~4.5 h. Accuracy plateaus at ~65% by step 25-50
+                                              # (100 and 200 steps gave the same; see experiments/)
 export SAMPLES_PER_PROMPT=4                   # 64 prompts x 4 samples per step, as in the Thinking Machines recipe
 export GROUP_SIZE=256                         # rollouts per step (= prompts x SAMPLES_PER_PROMPT); also the
                                               # sampler's --max-num-seqs, so re-apply the sampler on change
@@ -156,7 +158,8 @@ export WHITEN_ADVANTAGES=1                    # required: rollout reverse KL ave
 export PRECISION=lora                         # lora | full-fp32
 export LORA_R=32
 export LORA_ALPHA=64
-export LR=1e-5                                # at 1e-4 the student collapsed into long non-answers within ~4 steps
+export LR=2e-5                                # reaches the ~65% plateau ~4x sooner than 1e-5 without raising it.
+                                              # At 1e-4 the student collapsed into long non-answers within ~4 steps
 export WEIGHT_DECAY=0.0
 export WARMUP_RATIO=0.05
 export GRAD_CLIP=1.0
