@@ -1,0 +1,15 @@
+# OS / editor
+.DS_Store
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local archives and scratch copies -- not part of the project
+*.zip
+*.tgz
+code_old/
+
+# Account-specific overrides for manifests/env_vars
+code/manifests/env_vars.local

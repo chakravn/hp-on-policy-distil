@@ -1,0 +1,64 @@
+# Supervised warm-up, two stages sharing one template (src/gen_teacher_data.py, src/sft_warmup.py).
+#
+#   set -a && source manifests/env_vars && set +a
+#   aws s3 sync src s3://${S3_BUCKET}/opd/src
+#   envsubst < manifests/opd-config.yaml-template | kubectl --context "$CTX" apply -f -
+#
+#   # stage A -- teacher solutions (HTTP client of teacher-vllm, no GPU; resumable)
+#   SFT_JOB=opd-teacher-gen SFT_SCRIPT=gen_teacher_data.py SFT_JOB_GPUS=0 \
+#     envsubst < manifests/sft-job.yaml-template | kubectl --context "$CTX" apply -f -
+#   # stage B -- LoRA fine-tune on the correct + finished rows (one GPU: the trainer's)
+#   SFT_JOB=opd-sft SFT_SCRIPT=sft_warmup.py SFT_JOB_GPUS=1 \
+#     envsubst < manifests/sft-job.yaml-template | kubectl --context "$CTX" apply -f -
+#
+# Every flag defaults from the opd-config ConfigMap (SFT_* in manifests/env_vars).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${SFT_JOB}
+  namespace: ${NAMESPACE}
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels: { app: ${SFT_JOB} }
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        node.kubernetes.io/instance-type: ${INSTANCE_TYPE}
+      tolerations:
+        - key: sagemaker.amazonaws.com/node-health-status
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: sft
+          image: ${TRAIN_IMAGE}
+          envFrom:
+            - configMapRef: { name: opd-config }
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          command: ["/bin/bash", "-c"]
+          args:
+            # Same indentation on every line (YAML folded scalar; see the distill Job).
+            - >
+              pip install -q "openai>=1.40" "datasets" "peft>=0.11" "math-verify" &&
+              until python3 -c "import urllib.request; urllib.request.urlopen('${TEACHER_URL}/models')" 2>/dev/null; do
+                echo "waiting for teacher ${TEACHER_URL} ..."; sleep 15; done &&
+              cd ${CODE_DIR} &&
+              python3 ${SFT_SCRIPT}
+          resources:
+            limits:
+              nvidia.com/gpu: ${SFT_JOB_GPUS}
+          volumeMounts:
+            - { name: fsx, mountPath: /fsx }
+            - { name: s3,  mountPath: /s3 }
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - name: fsx
+          persistentVolumeClaim: { claimName: ${FSX_CLAIM} }
+        - name: s3
+          persistentVolumeClaim: { claimName: ${S3_CLAIM} }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 16Gi }

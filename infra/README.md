@@ -12,7 +12,7 @@ Template: [`hyperpod-eks-onpolicy-distillation.yaml`](./hyperpod-eks-onpolicy-di
 | --- | --- |
 | Network | VPC (`10.192.0.0/16`) + 4 secondary CIDRs, 4 public /24s, 4 EKS control-plane /24s, one full **/16 HyperPod subnet per AZ**, IGW, single NAT gateway, S3 gateway endpoint, interface endpoints for AMP and Grafana, one shared security group |
 | Storage | S3 data bucket + S3 access-log bucket (AES256, public access blocked, TLS-only bucket policies); FSx for Lustre `PERSISTENT_2` 1200 GiB @ 250 MB/s/TiB, LZ4, Lustre 2.15 |
-| Orchestration | EKS cluster (1.33, `API_AND_CONFIG_MAP`, all 5 control-plane log types, public + private endpoint) |
+| Orchestration | EKS cluster (Kubernetes 1.34 by default — the minimum for the task-governance add-on's Kueue; empty `KubernetesVersion` = latest standard-support version; `API_AND_CONFIG_MAP`, all 5 control-plane log types, public + private endpoint) |
 | EKS add-ons | `vpc-cni`, `kube-proxy`, `coredns`, `eks-pod-identity-agent`, `metrics-server`, `cert-manager`, `aws-ebs-csi-driver`, `aws-fsx-csi-driver`, `aws-mountpoint-s3-csi-driver`, `amazon-cloudwatch-observability`, `amazon-sagemaker-hyperpod-observability`, `amazon-sagemaker-hyperpod-taskgovernance`, `amazon-sagemaker-spaces` |
 | Cluster deps | HyperPod Helm chart from [`aws/sagemaker-hyperpod-cli`](https://github.com/aws/sagemaker-hyperpod-cli) (device plugins, EFA plugin, health-monitoring agent, deep health check, job auto-restart, training + MPI operators, MLflow) installed by a CodeBuild-backed custom resource |
 | HyperPod | `AWS::SageMaker::Cluster` named **`hp-cluster-onpolicy-distillation`**, two instance groups, `NodeRecovery: Automatic`, `NodeProvisioningMode: Continuous`, Karpenter autoscaling |

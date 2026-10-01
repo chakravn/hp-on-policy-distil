@@ -1,5 +1,12 @@
 # On-policy distillation on SageMaker HyperPod (EKS) — end-to-end runbook
 
+![Workflow: code to eval dashboard](slides/workflow.png)
+
+Distils **Qwen3.5-9B** into **Qwen3.5-0.8B** on GSM8K with on-policy distillation and no supervised
+warm-up: the student goes from **52.0% to 64.7%** (all 1,319 test problems, greedy) in 100 steps,
+closing 29.8% of the gap to the teacher's 94.5%. A more detailed version of the diagram is in
+[`slides/workflow-detailed.png`](slides/workflow-detailed.png).
+
 Deploy one CloudFormation template, open JupyterLab in SageMaker Studio, run
 `on_policy_distillation.ipynb`. The template creates the HyperPod cluster, the shared
 storage, the observability stack, a Studio domain **and** a JupyterLab space that clones
@@ -10,6 +17,7 @@ itself on every start.
 | --- | --- |
 | [`infra/`](./infra) | `hyperpod-eks-onpolicy-distillation.yaml` — the whole stack. See [`infra/README.md`](./infra/README.md) for the resource inventory and design notes. |
 | [`code/`](./code) | The notebook, the trainer (`src/`) and the Kubernetes manifests (`manifests/`) — this is what lives in the Git repository the space clones. See [`code/README.md`](./code/README.md). |
+| [`slides/`](./slides) | The workflow diagrams (HTML sources plus PNG/PDF renders). |
 
 ---
 
@@ -310,7 +318,7 @@ lifecycle script by restarting the space.
 Open `~/hp-on-policy-distil/on_policy_distillation.ipynb` (or `code/on_policy_distillation.ipynb`,
 depending on your repository layout) and pick the **Python 3 (ipykernel)** kernel.
 
-1. **Part 0 — Setup.** Edit the first code cell: `HP_CLUSTER_NAME=chakra-test` must become
+1. **Part 0 — Setup.** Edit the first code cell: `HP_CLUSTER_NAME=<your-hyperpod-cluster-name>` must become
    your cluster name.
 
    ```bash
@@ -323,7 +331,7 @@ depending on your repository layout) and pick the **Python 3 (ipykernel)** kerne
 
    ```bash
    mkdir -p ~/bin && cd ~/bin
-   curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable-1.33.txt)/bin/linux/amd64/kubectl"
+   curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable-1.34.txt)/bin/linux/amd64/kubectl"
    chmod +x kubectl
    ```
 
@@ -340,25 +348,30 @@ depending on your repository layout) and pick the **Python 3 (ipykernel)** kerne
    ```
 
 3. **Part 1 — Deploy the teacher.** Creates the `teacher-vllm` Deployment + ClusterIP
-   Service serving `Qwen/Qwen3-4B` on one GPU. Weights are pulled from Hugging Face into
-   the FSx cache (`HF_HOME=/fsx/hf_cache`) on first run, so `rollout status` can take
-   10+ minutes. Optional: stage weights to S3 (`s3://$S3_BUCKET/Qwen-Qwen3-4B`, visible in
-   pods as `/s3/Qwen-Qwen3-4B`) and point `TEACHER_MODEL` there for faster cold starts.
+   Service serving bf16 `Qwen/Qwen3.5-9B`, sharded over GPUs 0-1 (TP=2). Weights are pulled
+   from Hugging Face into the FSx cache (`HF_HOME=/fsx/hf_cache`) on first run, so
+   `rollout status` can take 10+ minutes.
 
-4. **Part 2 — Launch the student.** Syncs `src/` to `s3://$S3_BUCKET/opd/src` (the pod
-   reads it at `/s3/opd/src`) and submits the `opd-student` Job, which waits for the
-   teacher, then runs `train_distill.py` on its own GPU.
+4. **Part 2 — Launch the sampler and the student.** Applies the `student-sampler` vLLM
+   Deployment (GPU 3), syncs `src/` to `s3://$S3_BUCKET/opd/src` (the pod reads it at
+   `/s3/opd/src`) and submits the `opd-student` Job (GPU 2), which runs `preflight.py` and then
+   `train_distill.py`: 100 steps of 64 prompts × 4 rollouts, ~9 h.
 
-5. **Part 3 — Monitor.** `teacher_kl` should trend down. The plot reads
-   `/fsx/opd/run1/metrics_rank0.jsonl`; re-run the cells to refresh. Cluster and GPU
-   metrics also land in Amazon Managed Prometheus — use the `GrafanaWorkspaceEndpoint`
-   output if you created the Grafana workspace.
+5. **Part 3 — Monitor.** Plots `teacher_kl`, capped rollouts and rollout length from
+   `${RUN_DIR}/metrics_rank0.jsonl`; re-run the cells to refresh. Read `teacher_kl` together with
+   length — rambling text lowers it without any learning. Cluster and GPU metrics also land in
+   Amazon Managed Prometheus — use the `GrafanaWorkspaceEndpoint` output if you created the
+   Grafana workspace.
 
-6. **Part 4 — Cleanup.** Deletes the Job and the teacher Deployment/Service, freeing the
-   GPUs but leaving the cluster up.
+6. **Part 4 — Evaluate.** Runs the base student, any `student-step<N>` checkpoint and the
+   teacher on all 1,319 GSM8K test problems and reports the share of the teacher gap closed.
+   It needs no GPU, so it can run while training continues.
 
-The default GPU node (`ml.g5.24xlarge`, 4× L4) hosts both the teacher and the student pod,
-one GPU each. If you scale `GPU_PER_NODE` or add teacher replicas, add nodes as well.
+7. **Part 5 — Cleanup.** Deletes the Jobs, the sampler and the teacher, freeing the GPUs but
+   leaving the cluster up.
+
+The default GPU node (`ml.g5.24xlarge`, 4× A10G) is partitioned exactly: teacher 2 GPUs,
+trainer 1, sampler 1. If you scale `GPU_PER_NODE` or add teacher replicas, add nodes as well.
 
 ## Step 6 — Cleanup
 

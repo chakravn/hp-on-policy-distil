@@ -1,13 +1,34 @@
-# Student training pool: runs the on-policy distillation loop and queries the teacher
-# Service across the cluster. This cluster has NO Kubeflow PyTorchJob CRD, so we use a
-# plain K8s Job (single GPU node). For fault-tolerant multi-node, launch instead through
-# the HyperPod Training Operator or a verl RayJob (KubeRay is installed here) — see LAUNCH.md.
+# STAGE 1 of 2: the on-policy distillation loop (src/train_distill.py).
 #
-# Create with an ADMIN context (the SageMaker notebook role can't create Jobs):
+# Runs on the SAME single ml.g5.24xlarge as the teacher, taking GPU_PER_NODE (=1) of the four
+# devices; the teacher holds TEACHER_TP (=2) and the sampler holds the last one, so the node
+# is exactly full. K8s allocates GPUs exclusively, so there is no device overlap — but there
+# IS contention the manifests cannot express: the teacher's TP all-reduce and this pod's
+# HF-cache reads share the node's PCIe bus and /fsx mount. That is the price of the single-node
+# constraint, and it is why the teacher runs bf16 at TP=2 (~9 GiB/rank) rather than trying to
+# fit unquantised weights on one A10G.
+#
+# Because everything is co-resident, the teacher Service resolves to a pod on this same node;
+# scoring requests never leave it, which is the one silver lining (no cross-node hop).
+#
+# This cluster has NO Kubeflow PyTorchJob CRD, so we use a plain K8s Job (single GPU).
+# For fault-tolerant multi-node, launch instead through the HyperPod Training Operator or a
+# verl RayJob (KubeRay is installed here) -- see LAUNCH.md.
+#
 #   set -a && source manifests/env_vars && set +a
-#   # sync code to S3 first so the pod can read it at /s3/opd/src :
 #   aws s3 sync src s3://${S3_BUCKET}/opd/src
+#   envsubst < manifests/opd-config.yaml-template          | kubectl --context "$CTX" apply -f -
 #   envsubst < manifests/student-distill-job.yaml-template | kubectl --context "$CTX" apply -f -
+#
+# NO ARGUMENTS ARE PASSED: every flag defaults from the opd-config ConfigMap, so
+# manifests/env_vars is the single place a knob is set. Args on the command line here would
+# silently win over the ConfigMap and are exactly the drift this layout removes.
+#
+# The trainer runs `preflight.py` first and exits non-zero if the teacher is not returning
+# real log-probs, if the tokenizers differ, or if train/eval prompt formats disagree -- all
+# failures that otherwise produce a clean-looking run with a meaningless result. It then
+# gates on a step-0 sanity check: if the measured reverse KL is not positive, it exits 3
+# rather than spend hours optimising the student against noise.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -29,25 +50,35 @@ spec:
       containers:
         - name: trainer
           image: ${TRAIN_IMAGE}
+          envFrom:
+            - configMapRef: { name: opd-config }
           env:
-            - { name: HF_HOME, value: "${HF_HOME}" }
-            - { name: CODE_DIR, value: "${CODE_DIR}" }
-            - { name: TEACHER_URL, value: "${TEACHER_URL}" }
-            - { name: TEACHER_MODEL, value: "${TEACHER_MODEL_ID}" }
-            - { name: STUDENT_MODEL, value: "${STUDENT_MODEL}" }
-            - { name: RUN_DIR, value: "${RUN_DIR}" }
-            - { name: STEPS, value: "${STEPS}" }
-            - { name: GPU_PER_NODE, value: "${GPU_PER_NODE}" }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+            # A 2048-token sequence's fp32 [T, 248k] logits are ~2 GiB each (x ~4 with the
+            # softmax and its grad); with a fragmented cache the trainer hit "allocation failed
+            # with OOM ... retrying" at ~22 GiB. Expandable segments let the allocator grow blocks
+            # instead of needing one contiguous free chunk.
+            - { name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True" }
           command: ["/bin/bash", "-c"]
           args:
+            # peft: LoRA (the default; fp32 full fine-tuning needs far more memory from ~4B up).
+            # bitsandbytes: optional 8-bit Adam (ADAM_8BIT=1).
+            # NOTE: every line below must stay at the SAME indentation. YAML's folded
+            # scalar (>) joins equally-indented lines with spaces but preserves a newline
+            # before a MORE-indented one, which would split a command in half.
             - >
-              pip install -q "nvidia-nccl-cu13==2.29.7" "openai>=1.40" "datasets" &&
+              pip install -q "nvidia-nccl-cu13==2.29.7" "openai>=1.40" "datasets" "peft>=0.11" "bitsandbytes>=0.43" "flash-linear-attention" &&
               until python3 -c "import urllib.request; urllib.request.urlopen('${TEACHER_URL}/models')" 2>/dev/null; do
-                echo "waiting for teacher ${TEACHER_URL} ..."; sleep 10; done &&
+                echo "waiting for teacher ${TEACHER_URL} ..."; sleep 15; done &&
+              if [ -n "${STUDENT_SAMPLER_URL}" ]; then
+                until python3 -c "import urllib.request; urllib.request.urlopen('${STUDENT_SAMPLER_URL}/models')" 2>/dev/null; do
+                  echo "waiting for student sampler ${STUDENT_SAMPLER_URL} ..."; sleep 15; done;
+              fi &&
               cd ${CODE_DIR} &&
+              python3 preflight.py &&
               torchrun --nproc_per_node=${GPU_PER_NODE} train_distill.py
-              --teacher-url ${TEACHER_URL} --teacher-model ${TEACHER_MODEL}
-              --student-model ${STUDENT_MODEL} --steps ${STEPS} --output-dir ${RUN_DIR}
           resources:
             limits:
               nvidia.com/gpu: ${GPU_PER_NODE}
