@@ -83,6 +83,7 @@ export TEACHER_DTYPE=bfloat16
 export TEACHER_GPU_UTIL=0.90
 export TEACHER_MAX_MODEL_LEN=4096             # prompt + MAX_NEW_TOKENS must fit; also the sampler's limit
 export TEACHER_MAX_NUM_SEQS=48                # per replica
+export TEACHER_MAX_LOGPROBS=20                # >= TOPK_KL; 1 is enough for the sampled-token loss
 
 # --- Images ---
 # `latest` is a moving tag. Once a build is known good, pin all three to it: preflight's
@@ -151,6 +152,11 @@ export CLIP_RATIO=0.2                         # PPO importance-ratio clip
 export LOSS_NORM=token                        # token | sequence (every rollout weighs the same)
 export WHITEN_ADVANTAGES=1                    # required: rollout reverse KL averages ~+0.3, so without a baseline
                                               # nearly every sampled token is pushed down and the student flattens
+export TOPK_KL=0                              # k > 0: add a KL to the teacher's top-k next-token distribution
+                                              # at every completion position (a full target per token, not
+                                              # one sampled scalar). Needs TEACHER_MAX_LOGPROBS >= k
+export TOPK_KL_WEIGHT=1.0
+export TOPK_KL_MODE=forward                   # forward | reverse (see src/distill_step.py: topk_kl)
 
 # Optimization
 # LoRA keeps the frozen base in bf16 and the adapter in fp32: a bf16 parameter would round

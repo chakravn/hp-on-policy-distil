@@ -74,6 +74,9 @@ spec:
   # the same node, and the device plugin gives each a distinct GPU, so no anti-affinity rule is
   # needed. If a replica sits Pending, the partition is oversubscribed -- run preflight check [8].
   replicas: ${TEACHER_REPLICAS}
+  # Recreate, not the default rolling update: the node's GPUs are fully partitioned, so a
+  # surge pod could never schedule and a changed spec would wait on it forever.
+  strategy: { type: Recreate }
   selector:
     matchLabels: { app: teacher-vllm }
   template:
@@ -105,7 +108,7 @@ spec:
               --gpu-memory-utilization ${TEACHER_GPU_UTIL}
               --max-model-len ${TEACHER_MAX_MODEL_LEN}
               --max-num-seqs ${TEACHER_MAX_NUM_SEQS}
-              --max-logprobs 1
+              --max-logprobs ${TEACHER_MAX_LOGPROBS}
               --return-tokens-as-token-ids
           ports:
             - { containerPort: 8000 }

@@ -57,6 +57,9 @@ data:
   RKL_CLIP: "${RKL_CLIP}"
   CLIP_RATIO: "${CLIP_RATIO}"
   LOSS_NORM: "${LOSS_NORM}"          # token (default) | sequence (per-rollout weighting)
+  TOPK_KL: "${TOPK_KL}"              # 0 = off | k: also distil the teacher's top-k distribution
+  TOPK_KL_WEIGHT: "${TOPK_KL_WEIGHT}"
+  TOPK_KL_MODE: "${TOPK_KL_MODE}"    # forward | reverse
   ANSWER_SPAN_POLICY: "${ANSWER_SPAN_POLICY}"             # none | mask (zero credit on the final-answer line)
   TRUNCATION_PENALTY: "${TRUNCATION_PENALTY}"             # 0 = off; needs TRUNCATED_POLICY mask|keep
   TRUNCATION_PENALTY_TAIL: "${TRUNCATION_PENALTY_TAIL}"

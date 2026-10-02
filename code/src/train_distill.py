@@ -54,6 +54,7 @@ from distill_step import (
     distill_loss,
     rollout_reverse_kl,
     sequence_logprobs_batched,
+    topk_kl,
     whiten_advantages,
 )
 from model_setup import (
@@ -170,6 +171,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="token: every completion token in the batch weighs the same (long "
                          "rollouts dominate). sequence: every rollout weighs the same -- the "
                          "first version's weighting; see optimize_batch")
+    ap.add_argument("--topk-kl", type=int, default=int(env("TOPK_KL", "0")),
+                    help="also distil the teacher's top-k next-token distribution at every "
+                         "completion position (needs the teacher's --max-logprobs >= k). "
+                         "0 = off: the sampled-token reverse KL only, as in the blog")
+    ap.add_argument("--topk-kl-weight", type=float, default=float(env("TOPK_KL_WEIGHT", "1.0")),
+                    help="weight of the top-k KL term next to the policy-gradient term")
+    ap.add_argument("--topk-kl-mode", choices=["forward", "reverse"],
+                    default=env("TOPK_KL_MODE", "forward"), help="see distill_step.topk_kl")
     ap.add_argument("--no-whiten", dest="whiten", action="store_false",
                     default=env("WHITEN_ADVANTAGES", "1") == "1",
                     help="use the raw unnormalised -kl_coef*rkl advantage instead")
@@ -230,10 +239,13 @@ def _uses_vllm(args: argparse.Namespace) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def build_rollouts(samples, teacher_logps, policy_step: int, truncated_policy: str) -> list[Rollout]:
-    """Pair sampler output with teacher scores, applying the truncation policy."""
+def build_rollouts(samples, teacher_logps, policy_step: int, truncated_policy: str,
+                   teacher_topk=None) -> list[Rollout]:
+    """Pair sampler output with teacher scores, applying the truncation policy.
+    `teacher_topk` is an optional per-sample (top_ids, top_logps) list for --topk-kl."""
     rollouts: list[Rollout] = []
-    for sample, teacher_logp in zip(samples, teacher_logps):
+    teacher_topk = teacher_topk or [(None, None)] * len(samples)
+    for sample, teacher_logp, (top_ids, top_lps) in zip(samples, teacher_logps, teacher_topk):
         if sample.truncated and truncated_policy == "drop":
             continue
         rollouts.append(
@@ -245,6 +257,8 @@ def build_rollouts(samples, teacher_logps, policy_step: int, truncated_policy: s
                 produced_at_step=policy_step,
                 truncated=sample.truncated,
                 prompt_text=sample.prompt_text,
+                teacher_topk_ids=top_ids,
+                teacher_topk_logp=top_lps,
             )
         )
     return rollouts
@@ -360,6 +374,8 @@ def optimize_batch(
     pad_id = tokenizer.pad_token_id
     diags: list[dict] = []
     loss_total = 0.0
+    k = args.topk_kl
+    topk_sum, topk_n, mass_sum = 0.0, 0, 0.0
 
     for start in range(0, len(batch), args.micro_batch_size):
         chunk = batch[start : start + args.micro_batch_size]
@@ -372,11 +388,24 @@ def optimize_batch(
             input_ids[i, :n] = torch.tensor(r.token_ids, dtype=torch.long, device=device)
             attn[i, :n] = 1
 
+        gather_ids = teacher_topk = None
+        if k:
+            # Teacher top-k ids/log-probs laid out on the log-prob index grid (index i scores
+            # token i+1), so completion token j sits at index prompt_len - 1 + j.
+            gather_ids = torch.zeros((len(chunk), max_len - 1, k), dtype=torch.long, device=device)
+            teacher_topk = torch.zeros((len(chunk), max_len - 1, k), dtype=torch.float32, device=device)
+            for i, r in enumerate(chunk):
+                comp = completion_slice(r.prompt_len, len(r.token_ids))
+                gather_ids[i, comp] = torch.tensor(r.teacher_topk_ids, dtype=torch.long, device=device)
+                teacher_topk[i, comp] = torch.tensor(r.teacher_topk_logp, dtype=torch.float32, device=device)
+
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=device.startswith("cuda")):
-            logp_new_all = sequence_logprobs_batched(
+            out = sequence_logprobs_batched(
                 model, input_ids, attn, with_grad=True,
                 start=min(r.prompt_len for r in chunk) - 1,  # completion span only: see docstring
+                gather_ids=gather_ids,
             )
+        logp_new_all, student_topk = out if k else (out, None)
 
         micro_loss = None
         for i, (r, adv) in enumerate(zip(chunk, chunk_adv)):
@@ -388,6 +417,14 @@ def optimize_batch(
             piece, diag = distill_loss(
                 logp_new, logp_old, adv, clip_ratio=args.clip_ratio, reduction="sum"
             )
+            if k:
+                kl = topk_kl(student_topk[i, comp].float(), teacher_topk[i, comp], args.topk_kl_mode)
+                if r.truncated and args.truncated_policy == "mask" and kl.numel() > 0:
+                    kl = torch.cat([kl[:-1], kl.new_zeros(1)])  # same as the advantage's last token
+                piece = piece + args.topk_kl_weight * kl.sum()
+                topk_sum += float(kl.detach().sum())
+                topk_n += int(kl.numel())
+                mass_sum += float(teacher_topk[i, comp].logsumexp(-1).exp().sum())
             if args.loss_norm == "sequence":
                 # After the `/ total_tokens` below this is piece / (n_tokens_i * batch):
                 # rollout i's token mean, averaged over the batch.
@@ -406,6 +443,9 @@ def optimize_batch(
         "ratio_mean": statistics.fmean(d["ratio_mean"] for d in diags) if diags else 1.0,
         "ratio_max": max((d["ratio_max"] for d in diags), default=1.0),
         "policy_drift": statistics.fmean(d["policy_drift"] for d in diags) if diags else 0.0,
+        # Mean top-k KL per token, and how much of the teacher's probability its top-k holds.
+        **({"topk_kl": topk_sum / max(1, topk_n), "teacher_topk_mass": mass_sum / max(1, topk_n)}
+           if k else {}),
     }
 
 
@@ -567,13 +607,21 @@ def main(argv: list[str] | None = None) -> int:
         t_gen = time.time()
 
         # 2) score every token with the remote teacher (concurrent requests)
-        teacher_logps = teacher.score_batch([s.token_ids for s in samples])
+        teacher_topk = None
+        if args.topk_kl:
+            scored = teacher.score_batch_topk([s.token_ids for s in samples],
+                                              [s.prompt_len for s in samples], args.topk_kl)
+            teacher_logps = [lp for lp, _, _ in scored]
+            teacher_topk = [(ids, lps) for _, ids, lps in scored]
+        else:
+            teacher_logps = teacher.score_batch([s.token_ids for s in samples])
         t_score = time.time()
 
         # 3) buffer, honouring sampler lag: a vLLM sampler's weights are those of the last
         #    adapter push, so that -- not `step` -- is the policy these rollouts came from.
         policy_step = last_sync_step if _uses_vllm(args) else step
-        rollouts = build_rollouts(samples, teacher_logps, policy_step, args.truncated_policy)
+        rollouts = build_rollouts(samples, teacher_logps, policy_step, args.truncated_policy,
+                                  teacher_topk)
         buffer.extend(rollouts)
         truncated_frac = (
             sum(s.truncated for s in samples) / len(samples) if samples else 0.0
@@ -658,6 +706,9 @@ def main(argv: list[str] | None = None) -> int:
             "clip_frac": round(train_diag["clip_frac"], 4),
             "ratio_mean": round(train_diag["ratio_mean"], 4),
             "policy_drift": round(train_diag["policy_drift"], 5),
+            **({"topk_kl": round(train_diag["topk_kl"], 5),
+                "teacher_topk_mass": round(train_diag["teacher_topk_mass"], 4)}
+               if args.topk_kl else {}),
             "truncated_frac": round(truncated_frac, 3),
             "completion_tokens_mean": round(statistics.fmean(completion_lens), 1),
             "batch": len(batch),

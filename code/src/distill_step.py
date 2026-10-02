@@ -59,7 +59,8 @@ def sequence_logprobs_batched(
     attention_mask: torch.Tensor,   # [B, T]
     with_grad: bool = True,
     start: int = 0,
-) -> torch.Tensor:
+    gather_ids: torch.Tensor | None = None,   # [B, T-1, K] extra token ids per position
+):
     """Per-token log-probs for a right-padded batch: returns [B, T-1].
 
     Right padding (not left) because we are scoring existing sequences, not generating:
@@ -70,6 +71,9 @@ def sequence_logprobs_batched(
     The [B, T, V] logits over Qwen's ~248k vocab are the trainer's largest allocation, and
     with a few-shot prompt most positions are prompt tokens whose log-probs are never read.
     Pass `min(prompt_len) - 1` to project only the completion span.
+
+    With `gather_ids`, also returns the log-probs of those K tokens at every position
+    ([B, T-1, K], same alignment and zero-fill) -- the student side of the top-k KL.
     """
     T = input_ids.shape[1]
     start = max(0, min(start, T - 1))
@@ -84,9 +88,12 @@ def sequence_logprobs_batched(
         logits = logits[:, -keep:]
         logp = logits[:, :-1].log_softmax(-1)                                      # [B,keep-1,V]
         tok_logp = logp.gather(-1, input_ids[:, start + 1:, None]).squeeze(-1)     # [B,keep-1]
+        extra = logp.gather(-1, gather_ids[:, start:]) if gather_ids is not None else None
         if start:
             tok_logp = torch.cat([tok_logp.new_zeros(tok_logp.shape[0], start), tok_logp], 1)
-    return tok_logp
+            if extra is not None:
+                extra = torch.cat([extra.new_zeros(extra.shape[0], start, extra.shape[2]), extra], 1)
+    return tok_logp if gather_ids is None else (tok_logp, extra)
 
 
 def reverse_kl(student_logp: torch.Tensor, teacher_logp_full: torch.Tensor) -> torch.Tensor:
@@ -115,6 +122,24 @@ def rollout_reverse_kl(
     if rkl_clip and rkl_clip > 0:
         rkl = rkl.clamp(-rkl_clip, rkl_clip)
     return rkl
+
+
+def topk_kl(student_topk_logp: torch.Tensor, teacher_topk_logp: torch.Tensor,
+            mode: str = "forward") -> torch.Tensor:
+    """Per-token KL between teacher and student over the teacher's top-k tokens: [C, K] -> [C].
+
+    The sampled-token reverse KL gives one scalar of credit per token; the teacher's top-k
+    distribution gives the student a full target at every position it visited (on-policy,
+    as in GKD). The teacher's top-k is renormalised (top-20 covers nearly all its mass).
+      forward: sum_v p_T(v) [log p_T(v) - log p_S(v)] with the student's full-vocab
+               log-probs, so mass the student puts outside the teacher's top-k is penalised.
+      reverse: KL(q_S || p_T) with the student also renormalised over the top-k.
+    """
+    t = teacher_topk_logp.log_softmax(-1)
+    if mode == "reverse":
+        q = student_topk_logp.log_softmax(-1)
+        return (q.exp() * (q - t)).sum(-1)
+    return (t.exp() * (t - student_topk_logp)).sum(-1)
 
 
 def whiten_advantages(

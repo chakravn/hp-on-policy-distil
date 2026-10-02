@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 import random
 
 
@@ -47,6 +47,9 @@ class Rollout:
     # so the trainer drops (or masks) these -- see train_distill.--truncated-policy.
     truncated: bool = False
     prompt_text: str = ""          # kept for debugging / dumping example rollouts
+    # Teacher top-k next-token distribution per completion token (--topk-kl), else None.
+    teacher_topk_ids: Optional[List[List[int]]] = None
+    teacher_topk_logp: Optional[List[List[float]]] = None
 
     def num_completion_tokens(self) -> int:
         return len(self.token_ids) - self.prompt_len

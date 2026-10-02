@@ -112,6 +112,50 @@ class RemoteTeacher:
             )
         return [0.0 if v is None else float(v) for v in raw]
 
+    def score_topk(self, token_ids: Sequence[int], prompt_len: int, k: int):
+        """`score()` plus the teacher's top-`k` next-token distribution at every completion
+        position: returns (logps, top_ids, top_logps), the last two [n_completion][k].
+
+        Element j of top_ids/top_logps is the teacher's distribution over token
+        `prompt_len + j`, so it lines up 1:1 with the completion tokens. Needs the server
+        started with `--max-logprobs >= k` and `--return-tokens-as-token-ids` (keys arrive
+        as "token_id:<id>"; plain token strings cannot be mapped back to ids reliably).
+        """
+        resp = self.client.completions.create(
+            model=self.model,
+            prompt=list(token_ids),
+            max_tokens=1,
+            echo=True,
+            logprobs=k,
+            temperature=0.0,
+            extra_body={"return_tokens_as_token_ids": True},
+        )
+        logps = self._parse(resp, len(token_ids))
+        top = list(resp.choices[0].logprobs.top_logprobs)[:len(token_ids)]
+        top_ids, top_lps = [], []
+        for pos in range(prompt_len, len(token_ids)):
+            # vLLM adds the actual token to the top-k dict when it is not already in it,
+            # so a position can carry k+1 entries: keep the k most likely.
+            items = sorted((top[pos] or {}).items(), key=lambda kv: kv[1], reverse=True)[:k]
+            if not items:
+                raise TeacherScoringError(f"teacher returned no top logprobs at position {pos}")
+            ids = [int(key.rsplit(":", 1)[1]) for key, _ in items]
+            lps = [float(v) for _, v in items]
+            # Pad to k with a zero-probability entry (only if the server returned fewer).
+            ids += [ids[0]] * (k - len(ids))
+            lps += [-1e9] * (k - len(lps))
+            top_ids.append(ids)
+            top_lps.append(lps)
+        return logps, top_ids, top_lps
+
+    def score_batch_topk(self, batch: Sequence[Sequence[int]], prompt_lens: Sequence[int], k: int):
+        """Concurrent `score_topk`; returns a list of (logps, top_ids, top_logps)."""
+        if not batch:
+            return []
+        workers = max(1, min(self.max_concurrency, len(batch)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(lambda a: self.score_topk(a[0], a[1], k), zip(batch, prompt_lens)))
+
     def score_batch(self, batch: Sequence[Sequence[int]]) -> List[List[float]]:
         """Score many sequences concurrently.
 

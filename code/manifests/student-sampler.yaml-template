@@ -47,6 +47,9 @@ metadata:
   labels: { app: student-sampler }
 spec:
   replicas: 1
+  # Recreate, not the default rolling update: the node's GPUs are fully partitioned, so a
+  # surge pod could never schedule and a changed spec would wait on it forever.
+  strategy: { type: Recreate }
   selector:
     matchLabels: { app: student-sampler }
   template:
