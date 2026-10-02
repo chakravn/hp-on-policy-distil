@@ -5,10 +5,14 @@
 # one of these variables, the opd-config ConfigMap carries them into the pods, and the Jobs pass
 # no arguments of their own.
 #
-# Shipped configuration: on-policy distillation of Qwen3.5-0.8B (instruct) from Qwen3.5-9B on
-# GSM8K -- no supervised warm-up. Measured result (1,319 GSM8K test problems, greedy):
-#     base student 52.0%  ->  distilled ~65%  (teacher 94.5%; ~30% of the gap). Every run plateaus at
-#     64-66%; LR 2e-5 gets there by step 25. Per-run configs and results: experiments/
+# Shipped configuration (experiments/configs/run17.env): on-policy distillation of Qwen3.5-2B
+# (instruct, LoRA r=128) from Qwen3.5-9B on GSM8K -- no supervised warm-up. Measured result
+# (1,319 GSM8K test problems, greedy):
+#     base student 74.8%  ->  distilled 84.0% at step 25, 83.9% at step 50
+#     (teacher 94.5%; 47% of the gap). The 0.8B reaches only ~65% (30% of its gap).
+# The student was picked by a baseline eval of the candidates first (notebook Part 1):
+#     Qwen3.5-0.8B 52.0% · Qwen3.5-2B 74.8% · Qwen3.5-4B 92.8% · teacher Qwen3.5-9B 94.5%
+# Per-run configs and results: experiments/
 #
 # NOTE: the SageMaker notebook role has been granted EKS cluster-admin (AmazonEKSClusterAdminPolicy),
 # so it can create/delete cluster resources directly from the notebook. To revoke:
@@ -62,10 +66,11 @@ export CODE_DIR=/s3/opd/src                   # synced via: aws s3 sync src s3:/
 # preflight.py check [3] verifies it.
 export TEACHER_MODEL=Qwen/Qwen3.5-9B          # what vLLM loads: an HF id or a /fsx or /s3 path
 export TEACHER_MODEL_ID=Qwen/Qwen3.5-9B       # --served-model-name; keep it a real HF id (preflight reads it)
-export STUDENT_MODEL=Qwen/Qwen3.5-0.8B        # instruct model, trained with LoRA
+export STUDENT_MODEL=Qwen/Qwen3.5-2B          # instruct model, trained with LoRA. Picked by the baseline
+                                              # eval (notebook Part 1): Qwen/Qwen3.5-0.8B is the other candidate
 export TEACHER_PARAMS_B=9.65                  # preflight memory arithmetic only
 export TEACHER_WEIGHTS_GIB=18.0               # measured size of TEACHER_MODEL on disk
-export STUDENT_PARAMS_B=0.8
+export STUDENT_PARAMS_B=2
 export GPU_MEM_GB=22.5                        # usable per-GPU memory ("24 GB" A10G reports 22.5 GiB)
 
 # --- Teacher serving (manifests/teacher-vllm.yaml-template) ---
@@ -101,7 +106,7 @@ export STUDENT_SAMPLER_URL=http://student-sampler.$NAMESPACE.svc.cluster.local:8
 export SAMPLER_SYNC_EVERY=1                   # steps between LoRA hot-swaps into the sampler
 
 # --- Task / data ---
-# GSM8K: the 0.8B scores 52% and the teacher 94.5%, a wide gap, and answers are short (~300 tokens).
+# GSM8K: the 2B scores 74.8% and the teacher 94.5%, a wide gap, and answers are short (~300 tokens).
 # MATH-500 is also supported (TASK=math500, TRAIN_DATASET=EleutherAI/hendrycks_math with every subject
 # config, MAX_NEW_TOKENS=EVAL_MAX_TOKENS=2048, EVAL_LIMIT=500), but it is too hard for a 0.8B student:
 # at the training temperature it solves ~17% of problems and leaves ~60% unfinished, so most
@@ -120,13 +125,14 @@ export ENABLE_THINKING=0
 # the per-token reverse KL. Starts from the pristine student; there is no supervised warm-up.
 export INIT_ADAPTER=                          # empty = pristine student; a student-step<N> dir to resume
 export RUN_DIR=/fsx/opd/gsm8k-opd             # checkpoints + metrics; use a new dir per run
-export STEPS=50                               # ~5.5 min/step => ~4.5 h. Accuracy plateaus at ~65% by step 25-50
-                                              # (100 and 200 steps gave the same; see experiments/)
+export STEPS=50                               # ~5.5 min/step => ~4.5 h. Accuracy plateaus by step 25
+                                              # (84.0% at 25, 83.9% at 50; longer runs gave nothing more)
 export SAMPLES_PER_PROMPT=4                   # 64 prompts x 4 samples per step, as in the Thinking Machines recipe
 export GROUP_SIZE=256                         # rollouts per step (= prompts x SAMPLES_PER_PROMPT); also the
                                               # sampler's --max-num-seqs, so re-apply the sampler on change
 export BATCH_SIZE=256                         # rollouts per optimizer step
-export MICRO_BATCH_SIZE=4                     # backward chunk; changes memory, never the update
+export MICRO_BATCH_SIZE=2                     # backward chunk; changes memory, never the update. 2 for the 2B: the 0.8B
+                                              # already peaked at ~18 GB with 4 on 1024-token rollouts
 export GEN_MICRO_BATCH=8                      # HF in-process sampler only
 export BUFFER_CAPACITY=512
 export BUFFER_MAX_AGE=-1                      # -1 = auto (SAMPLER_SYNC_EVERY with the vLLM sampler)
@@ -162,9 +168,9 @@ export TOPK_KL_MODE=forward                   # forward | reverse (see src/disti
 # LoRA keeps the frozen base in bf16 and the adapter in fp32: a bf16 parameter would round
 # away updates smaller than its ~0.4% resolution.
 export PRECISION=lora                         # lora | full-fp32
-export LORA_R=32
-export LORA_ALPHA=64
-export LR=2e-5                                # reaches the ~65% plateau ~4x sooner than 1e-5 without raising it.
+export LORA_R=128                             # also the sampler's --max-lora-rank. r=32 gave 83.2%
+export LORA_ALPHA=256                         # alpha/r = 2
+export LR=2e-5                                # reaches the plateau ~4x sooner than 1e-5 without raising it.
                                               # At 1e-4 the student collapsed into long non-answers within ~4 steps
 export WEIGHT_DECAY=0.0
 export WARMUP_RATIO=0.05

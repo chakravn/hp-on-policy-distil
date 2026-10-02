@@ -1,14 +1,15 @@
 # On-Policy Distillation on SageMaker HyperPod EKS — Code Talk
 
 Distil a **teacher** (`Qwen/Qwen3.5-9B`, bf16, one whole copy sharded over TP=2) into a lean
-**student** (`Qwen/Qwen3.5-0.8B`, instruct, LoRA) by training on the *student's own* GSM8K
+**student** (`Qwen/Qwen3.5-2B`, instruct, LoRA r=128) by training on the *student's own* GSM8K
 rollouts with **dense, per-token feedback** (reverse KL to the teacher). No verifier, no reward
 model and no supervised warm-up. Everything runs on **one `ml.g5.24xlarge`** (4× A10G 24 GB).
 
-**Result** (all 1,319 GSM8K test problems, greedy): **52.0% → ~65%**, closing **~30%** of the gap to
-the teacher's 94.5%. Every run plateaus at 64–66% (best 65.8%, z = +9.54); with `LR=2e-5` the
-student gets there by step 25. A **2B student** goes 74.8% → **84.0%** with the same recipe and LoRA
-rank 128 (47% of its gap). Per-run configs and results are in [`experiments/`](experiments/).
+**Result** (all 1,319 GSM8K test problems, greedy): **74.8% → 84.0%** after 25 steps, closing **47%**
+of the gap to the teacher's 94.3% (z = +7.45; 195 problems fixed, 73 broken). The student was
+chosen by a **baseline eval** first — teacher 94.3%, `Qwen3.5-2B` 74.8%, `Qwen3.5-0.8B` 52.0%: the
+0.8B has the wider gap but plateaus at 64–66% (~30% of it) whatever the schedule. Per-run configs
+and results are in [`experiments/`](experiments/).
 
 **Target cluster:** `hp-cluster-onpolicy-distillation` (instantstart) · EKS, `us-west-2`, ns
 `default`. Storage: **FSx `/fsx` (`fsx-claim`) = high-throughput working store** (HF cache,
@@ -23,8 +24,8 @@ four devices are *partitioned*, never shared:
 |---|---|---|
 | 0 | `teacher-vllm` rank 0 — half of one bf16 `Qwen/Qwen3.5-9B`, TP=2, `replicas: 1` | ~9.0 GB weights, ~7.8 GB cache |
 | 1 | `teacher-vllm` rank 1 — the other half | ~9.0 GB weights, ~7.8 GB cache |
-| 2 | `opd-student` — the trainer (LoRA on the 0.8B) | ~6-18 GB, peaks on 1024-token rollouts |
-| 3 | `student-sampler` (vLLM rollouts, LoRA hot-swap; also serves the eval) | ~2 GB + KV |
+| 2 | `opd-student` — the trainer (bf16 2B + fp32 LoRA r=128) | peaks on 1024-token rollouts (`MICRO_BATCH_SIZE=2`) |
+| 3 | `student-sampler` (vLLM rollouts, LoRA hot-swap; also serves the baseline and eval) | ~4 GB + KV |
 
 `preflight.py` check **[8]** does this subtraction before anything launches, because an
 oversubscribed partition surfaces as a pod stuck `Pending` forever with no error in any log. It
@@ -71,7 +72,7 @@ not queue-bound.
 > Two honest costs of the shipped (bf16, TP=2) layout:
 > - **The ceiling.** The teacher is the accuracy *ceiling* — the student moves toward it and cannot
 >   pass it. `headroom_recovered = (after − before) / (teacher − before)`. Run
->   `EVAL_PHASE=before,teacher` first to measure the gap (GSM8K: 0.8B 52.0% vs. 9B 94.5%).
+>   the baseline first to measure the gap (GSM8K: 9B 94.3% vs. 2B 74.8% vs. 0.8B 52.0%).
 > - **The all-reduce.** TP=2 pays a PCIe all-reduce per prefill layer. On a split-switch pair it
 >   is measurably slower than a same-switch pair, which is why preflight [4] warns.
 >
@@ -88,20 +89,23 @@ not queue-bound.
 > 24 GB) every number above is unchanged and L4 is the faster GPU. Note g5 is **A10G**, g6 is
 > **L4**.
 
-## The pipeline is two stages, in this order
+## The pipeline is three stages, in this order
 
 | # | Stage | Script / Job | Why it exists |
 |---|---|---|---|
+| 0 | **Baseline & model selection** | `src/eval_student.py` · `opd-student-eval` | The teacher and each candidate student on the same 1,319 problems: the gap decides which student to distil. |
 | 1 | **On-policy distillation** | `src/train_distill.py` · `opd-student` | Per-token reverse KL against the teacher on the student's *own* rollouts, starting from the base student. |
-| 2 | **Eval** | `src/eval_student.py` · `opd-student-eval` | GSM8K (all 1,319), three phases: base student, distilled student, **and the teacher**. |
+| 2 | **Eval** | `src/eval_student.py` · `opd-student-eval` | The distilled checkpoints, against the baseline's base student **and teacher** (carried forward). |
 
 **There is no supervised warm-up** — the trainer starts from the pristine instruct student, and
 the 4-shot prompt (`TRAIN_FEWSHOT=EVAL_FEWSHOT=4`, enforced by preflight [7]) carries the answer
-format. Four settings turned out to be essential, each found by a failed run:
+format. Five settings turned out to be essential, each found by a failed run or the baseline:
 
-- **`LR=2e-5`, `STEPS=50`.** It reaches the ~65% plateau by step 25; 1e-5 takes ~100 steps to the same
-  level, and more steps (200) do not raise it. At 1e-4 the student collapsed within ~4 steps (capped
-  rollouts 9% → 50–70%).
+- **`LR=2e-5`, `STEPS=50`.** It reaches the plateau by step 25 (84.0%, then 83.9% at 50); on the 0.8B,
+  1e-5 took ~100 steps to the same level and 200 steps did not raise it. At 1e-4 the student collapsed
+  within ~4 steps (capped rollouts 9% → 50–70%).
+- **The 2B student with LoRA r=128** (`LORA_ALPHA=256`). The ceiling is the student's capacity: the
+  0.8B plateaus at ~65%, the 2B at r=32 reached 83.2%, at r=128 84.0%.
 - **`ANSWER_SPAN_POLICY=mask`** — zero credit on the final-answer line and `<|im_end|>`. Those tokens
   carry the largest reverse KL (+0.54 vs. +0.33 for reasoning) because the teacher can tell when
   the number is wrong; without masking the student learns to stop writing answers.
@@ -113,12 +117,12 @@ format. Four settings turned out to be essential, each found by a failed run:
 student drifting toward longer answers *lowers* `teacher_kl` without learning. Watch it next to
 `truncated_frac`, `completion_tokens_mean` and `answer_masked_rollouts`, and judge by the eval.
 
-Run the eval with `EVAL_PHASE=before,teacher` once first (~20 min) to measure the gap before a
-~4.5 h run.
+Run the baseline first (notebook Part 1, ~45 min for the teacher and two candidates) to measure the
+gap before a ~4.5 h run.
 
 ## Contents
 ```
-on_policy_distillation.ipynb        # the control panel: setup -> teacher -> train -> monitor -> eval
+on_policy_distillation.ipynb        # the control panel: setup -> baseline + model selection -> train -> monitor -> eval
 architecture.md                     # the GPU partition + data flow, as a mermaid diagram
 src/
   prompts.py                        # THE prompt format, answer extraction and equivalence —
@@ -278,7 +282,7 @@ against three models, same samples and same prompt:
 
 | phase | model | source |
 |---|---|---|
-| `before`  | `Qwen/Qwen3.5-0.8B` | the pristine student, generated by the sampler |
+| `before`  | `Qwen/Qwen3.5-2B` | the pristine student, generated by the sampler (the Part 1 baseline) |
 | `after`   | `student-step<N>` | a LoRA checkpoint loaded into the sampler (`$EVAL_FT_MODEL_DIR`) |
 | `teacher` | `Qwen/Qwen3.5-9B` (bf16) | the teacher Service (`$TEACHER_URL`) |
 
@@ -298,6 +302,11 @@ greedy, semantic match on the `#### N` answer; the standard error is ~±1.4 pp. 
 also works and suits a larger (≥4B) student — for the 0.8B it is too hard (~17% of problems solved
 at the training temperature).
 
+**Phases carry forward.** `eval_student.py` reuses any phase already in `$EVAL_DIR/summary.json` that
+was recorded with the same eval config, so the notebook measures `before` and `teacher` once in the
+Part 1 baseline (one directory per model, `/fsx/opd/baseline-<task>-<model>`) and runs only `after`
+for each checkpoint.
+
 ```bash
 set -a && source manifests/env_vars && set +a
 aws s3 sync src s3://$S3_BUCKET/opd/src
@@ -310,8 +319,8 @@ Outputs under `$EVAL_DIR`: `summary.json` (accuracy ± stderr per phase, `delta_
 `teacher_gap`, `headroom_recovered`, paired `transitions` = fixed / broken / both_correct /
 both_wrong, format-compliance and length metrics), `samples_<phase>.jsonl` (one row per eval
 sample) and Inspect logs in `logs/<phase>` (`inspect view --log-dir …`). The same payload is
-printed between `===EVAL_DASHBOARD_JSON_BEGIN/END===` sentinels, so **Part 4 of the notebook**
-renders its dashboard straight from `kubectl logs job/opd-student-eval`.
+printed between `===EVAL_DASHBOARD_JSON_BEGIN/END===` sentinels. The notebook's dashboards read
+`summary.json` and the per-sample files from `/fsx` through the teacher pod.
 
 ## The method in one screen
 ```

@@ -44,7 +44,7 @@ teacher over HTTP (`EVAL_STUDENT_URL`, `EVAL_GPUS=0`), so it runs alongside trai
 compute-bound, not queue-bound.
 
 - **Download the teacher** `Qwen/Qwen3.5-9B` (bf16 safetensors, ~18 GiB) into the bucket
-  (GUI → HF Download → S3, or the agent). Do the same for the `Qwen/Qwen3.5-0.8B` student.
+  (GUI → HF Download → S3, or the agent). Do the same for the `Qwen/Qwen3.5-2B` student (and `Qwen/Qwen3.5-0.8B` if you baseline it).
 - **Download the bf16 repo**, unquantised. Two quantised routes are closed on this hardware:
   vLLM can no longer quantise a bf16 checkpoint as it loads (`--quantization bitsandbytes` was how
   this pipeline used to do it; vLLM removed bitsandbytes from its registry, so that configuration
@@ -102,7 +102,8 @@ Three flags are not optional:
   cannot drift. preflight [2] verifies both the method (against the vLLM build's registry) and its
   minimum compute capability.
 
-- `--max-logprobs 1` — without it, vLLM returns `null` for echo log-probs. That is the failure
+- `--max-logprobs ${TEACHER_MAX_LOGPROBS}` (≥ 1; 20 for the experimental `TOPK_KL`) — without it, vLLM
+  returns `null` for echo log-probs. That is the failure
   that produced the original ~6-point result: the client turned nulls into `0.0`, the advantage
   became `−log π_student` (self-reinforcement), and `teacher_kl` still printed a falling curve.
   `teacher_client.py` now **raises** instead of zeroing, and `preflight.py` check [5] catches it
@@ -118,7 +119,7 @@ python3 src/preflight.py --teacher-url http://localhost:8000/v1
 **or instantstart agent (kiro-cli):**
 > "Deploy `vllm serve /s3/Qwen-Qwen3.5-9B --served-model-name Qwen/Qwen3.5-9B
 > --tensor-parallel-size 2 --distributed-executor-backend mp
-> --dtype bfloat16 --max-model-len 2048 --max-num-seqs 48 --max-logprobs 1
+> --dtype bfloat16 --max-model-len 2048 --max-num-seqs 48 --max-logprobs 20
 > --return-tokens-as-token-ids` with **1 replica × 2 GPUs** on ml.g5.24xlarge, /dev/shm 16Gi,
 > `VLLM_WORKER_MULTIPROC_METHOD=spawn`, service type clusterip, name teacher-vllm — and wait
 > until the pod is Running and /v1/models responds."
@@ -126,19 +127,23 @@ python3 src/preflight.py --teacher-url http://localhost:8000/v1
 
 ## 2. Stage 1 — on-policy distillation
 
-**First, the cheap viability check (~30–60 min).** The trainer starts from the base student, so
-before committing 22–30 h, measure whether there is anything to distil — and with a 9B teacher this
-is the check that tells you whether the ceiling is high enough to reach your target at all:
+**First, the baseline (~45 min; notebook Part 1).** The trainer starts from the base student, so
+before committing ~4.5 h, measure the teacher and every candidate student on the same problems —
+that is what tells you whether there is anything to distil and which student to pick (GSM8K: 9B
+94.3%, 2B 74.8%, 0.8B 52.0% → the 2B). For one candidate by hand (the sampler must serve it):
 
 ```bash
-export EVAL_PHASE=before,teacher     # base accuracy, format compliance, teacher ceiling
+export STUDENT_MODEL=Qwen/Qwen3.5-2B EVAL_BASE_MODEL=Qwen/Qwen3.5-2B
+export EVAL_PHASE=before,teacher EVAL_DIR=/fsx/opd/baseline-gsm8k-qwen3.5-2b
 envsubst < manifests/opd-config.yaml-template       | kubectl --context "$CTX" apply -f -
+envsubst < manifests/student-sampler.yaml-template  | kubectl --context "$CTX" apply -f -
 envsubst < manifests/student-eval-job.yaml-template | kubectl --context "$CTX" apply -f -
 ```
 A wide `teacher − before` gap with **high format compliance** means there is headroom to work
 with. Low format compliance means the reverse KL will spend the run fighting format instead of
 reasoning — raise `TRAIN_FEWSHOT`/`EVAL_FEWSHOT` together (they must match) or fix the chat
-template before starting. Reset `EVAL_PHASE=all` and delete the Job afterwards.
+template before starting. Re-source `manifests/env_vars` (it resets `STUDENT_MODEL` and the `EVAL_*`
+overrides), re-apply the ConfigMap and delete the Job afterwards.
 
 **Then the run itself:**
 ```bash
@@ -238,8 +243,8 @@ dashboard's input), and full Inspect logs in `logs/<phase>`
 (`inspect view --log-dir ${EVAL_DIR}/logs/after`).
 
 The same payload is printed to stdout between `===EVAL_DASHBOARD_JSON_BEGIN===` /
-`===EVAL_DASHBOARD_JSON_END===`, so the notebook's **Part 4 dashboard** rebuilds every chart from
-the Job log alone — no `/fsx` access needed after the pod Completes:
+`===EVAL_DASHBOARD_JSON_END===`, so every chart can be rebuilt from the Job log alone, with no `/fsx`
+access after the pod Completes (the notebook reads `/fsx` through the teacher pod instead):
 ```bash
 kubectl --context "$CTX" -n default logs job/opd-student-eval --tail=-1   # contains the JSON payload
 # or read the files directly through any pod that mounts /fsx:

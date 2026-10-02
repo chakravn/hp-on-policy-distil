@@ -56,20 +56,21 @@
 
   <header>
     <h1>On-Policy Distillation on HyperPod — <span>code to eval dashboard</span></h1>
-    <div class="sub">Qwen3.5-9B teacher &rarr; Qwen3.5-0.8B student · GSM8K · no SFT · one ml.g5.24xlarge · driven from one notebook</div>
+    <div class="sub">Qwen3.5-9B teacher &rarr; Qwen3.5-2B student (LoRA r=128) · GSM8K · no SFT · one ml.g5.24xlarge · driven from one notebook</div>
   </header>
 
   <div class="phase" style="left:70px">SETUP — ONCE</div>
+  <div class="phase" style="left:850px">BASELINE — ONCE</div>
   <div class="phase" style="left:1110px">RUN — EACH EXPERIMENT</div>
 
   <!-- 7 steps: left 70, width 220, pitch 260 -->
   <div class="step" style="left:70px"><div class="num">1</div><h2>Code</h2><p>Infra template, training &amp; eval code, notebook</p></div>
   <div class="step" style="left:330px"><div class="num">2</div><h2>Provision</h2><p>CloudFormation: EKS, HyperPod, FSx, S3</p></div>
   <div class="step" style="left:590px"><div class="num">3</div><h2>Configure</h2><p>Code &amp; weights to S3, one ConfigMap</p></div>
-  <div class="step" style="left:850px"><div class="num">4</div><h2>Teacher</h2><p>vLLM serves the 9B model</p></div>
-  <div class="step hl" style="left:1110px"><div class="num">5</div><h2>Distill</h2><p>On-policy loop, LoRA student, no warm-up</p></div>
-  <div class="step" style="left:1370px"><div class="num">6</div><h2>Evaluate</h2><p>GSM8K: before, after, teacher</p></div>
-  <div class="step" style="left:1630px; border-color:var(--navy)"><div class="num">7</div><h2>Dashboard</h2><p><b style="color:#16191f">52.0% &rarr; 64.7%</b><br>teacher 94.5%<br>30% of the gap closed</p></div>
+  <div class="step" style="left:850px; border-color:var(--teal); background:#f0fdfa"><div class="num" style="background:var(--teal)">4</div><h2>Baseline</h2><p>Serve the 9B; eval 9B · 2B · 0.8B<br><b style="color:#16191f">94.3 · 74.8 · 52.0%</b><br>&rarr; pick the 2B</p></div>
+  <div class="step hl" style="left:1110px"><div class="num">5</div><h2>Distill</h2><p>On-policy loop, 2B LoRA student, no warm-up</p></div>
+  <div class="step" style="left:1370px"><div class="num">6</div><h2>Evaluate</h2><p>GSM8K: after vs. the baseline and teacher</p></div>
+  <div class="step" style="left:1630px; border-color:var(--navy)"><div class="num">7</div><h2>Dashboard</h2><p><b style="color:#16191f">74.8% &rarr; 84.0%</b><br>teacher 94.3%<br>47% of the gap closed</p></div>
 
   <!-- step 5 detail -->
   <div class="panel loop">

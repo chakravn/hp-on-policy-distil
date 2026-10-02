@@ -45,8 +45,9 @@ hardware are closed:
   capability: 86.` W4A16 (`CompressedTensorsWNA16`) is 75, the only quantised route this hardware
   accepts — kept as the fallback in `env_vars` if you need the spare GPU back.
 
-The teacher is also the accuracy **ceiling**: run `EVAL_PHASE=before,teacher` before committing
-to the ~4.5 h run (GSM8K: 0.8B 52.0% vs. 9B 94.5%).
+The teacher is also the accuracy **ceiling**: the notebook's Part 1 baseline measures it and each
+candidate student before committing to the ~4.5 h run (GSM8K: 9B 94.3%, 2B 74.8%, 0.8B 52.0% — the
+2B is distilled).
 
 **Cache arithmetic is hybrid-aware.** Qwen3.5 alternates 3 `linear_attention` layers to 1
 `full_attention`, so of 32 layers only 8 hold a growing KV cache (32 KiB/token) while 24 hold a

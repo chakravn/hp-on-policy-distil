@@ -10,6 +10,7 @@ RUNS=[  # name, student, eval dir, steps evaluated, lr, total steps, baseline di
     ("run15","Qwen3.5-0.8B","/fsx/opd/eval-run15",[25,50,75,100],"2e-5",100,"/fsx/opd/baseline-gsm8k"),
     ("run16","Qwen3.5-2B","/fsx/opd/eval-run16",[25,50],"2e-5",50,"/fsx/opd/baseline-gsm8k-2b"),
     ("run17","Qwen3.5-2B (LoRA r=128)","/fsx/opd/eval-run17",[25,50],"2e-5",50,"/fsx/opd/baseline-gsm8k-2b"),
+    ("run18","Qwen3.5-2B (r=128, T=1.0, 8/prompt)","/fsx/opd/eval-run18",[25,50],"2e-5",50,"/fsx/opd/baseline-gsm8k-2b"),
 ]
 w=csv.writer(sys.stdout)
 w.writerow(["run","student","lr","total_steps","step","base_accuracy","accuracy","delta_vs_base_pp","fixed","broken",

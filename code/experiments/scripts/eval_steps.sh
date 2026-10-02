@@ -22,7 +22,7 @@ for s in "$@"; do
   until sp=$(SP) && [ -n "$sp" ] && K exec "$sp" -c vllm -- test -f "$AD/adapter_config.json" 2>/dev/null; do refresh; sleep 120; done
   sleep 30; say "$PFX step $s checkpoint found"; refresh
   if ! K exec "$(SP)" -c vllm -- test -f "$DIR/samples_after.jsonl" 2>/dev/null; then
-    until K exec "$(SP)" -c vllm -- sh -c "mkdir -p $DIR && cp ${BASE_DIR:-/fsx/opd/baseline-gsm8k}/summary.json $DIR/" 2>/dev/null; do refresh; sleep 30; done
+    until K exec "$(SP)" -c vllm -- sh -c "mkdir -p $DIR && cp ${BASE_DIR:-/fsx/opd/baseline-gsm8k-2b}/summary.json $DIR/" 2>/dev/null; do refresh; sleep 30; done
     export EVAL_FT_MODEL_DIR=$AD EVAL_PHASE=after EVAL_DIR=$DIR
     K delete job "$J" --ignore-not-found >/dev/null 2>&1
     until envsubst < manifests/student-eval-job.yaml-template | sed -e "s|name: opd-student-eval|name: $J|" -e "s|app: opd-student-eval|app: $J|" -e "s|^          env:|          env:\\
@@ -33,6 +33,6 @@ for s in "$@"; do
   fi
   ARGS="$ARGS $PFX-s$s=$DIR/samples_after.jsonl"
   sp=$(SP); K cp $SUMMARIZE "$sp":/tmp/summarize.py -c vllm >/dev/null 2>&1
-  say "results so far:"; K exec "$sp" -c vllm -- env BASE_DIR=${BASE_DIR:-/fsx/opd/baseline-gsm8k} python3 /tmp/summarize.py ${COMPARE:-} $ARGS 2>/dev/null | grep -E "^(base|teacher|run1)"
+  say "results so far:"; K exec "$sp" -c vllm -- env BASE_DIR=${BASE_DIR:-/fsx/opd/baseline-gsm8k-2b} python3 /tmp/summarize.py ${COMPARE:-} $ARGS 2>/dev/null | grep -E "^(base|teacher|run1)"
 done
 say "=== $PFX evals complete ==="

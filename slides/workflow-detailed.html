@@ -79,10 +79,10 @@
 
   <header>
     <h1>On-Policy Distillation on SageMaker HyperPod — <span>code to eval dashboard</span></h1>
-    <div class="sub">Qwen3.5-9B teacher &rarr; Qwen3.5-0.8B student (LoRA) &nbsp;·&nbsp; GSM8K, no SFT &nbsp;·&nbsp; one <code>ml.g5.24xlarge</code> (4× A10G) on HyperPod EKS &nbsp;·&nbsp; driven end-to-end from one notebook</div>
+    <div class="sub">Qwen3.5-9B teacher &rarr; Qwen3.5-2B student (LoRA r=128) &nbsp;·&nbsp; GSM8K, no SFT &nbsp;·&nbsp; one <code>ml.g5.24xlarge</code> (4× A10G) on HyperPod EKS &nbsp;·&nbsp; driven end-to-end from one notebook</div>
   </header>
 
-  <div class="lane" style="top:140px">SETUP — ONCE</div>
+  <div class="lane" style="top:140px">SETUP &amp; BASELINE — ONCE</div>
   <div class="lane" style="top:516px">RUN — EACH EXPERIMENT</div>
 
   <!-- ============ SETUP ROW ============ -->
@@ -119,14 +119,14 @@
     </ul>
   </div>
 
-  <div class="card setup" style="left:1450px">
-    <h2><span class="num">4</span>Serve teacher</h2>
-    <div class="where">Part 1 · Deployment <code>teacher-vllm</code></div>
+  <div class="card setup" style="left:1450px; border-color:var(--teal); background:#f0fdfa">
+    <h2><span class="num" style="background:var(--teal)">4</span>Baseline &amp; pick the student</h2>
+    <div class="where">Part 1 · <code>teacher-vllm</code> + <code>student-sampler</code></div>
     <ul>
-      <li>vLLM, bf16, TP=2 on GPUs 0–1</li>
-      <li>Scores via echo log-probs — prefill only</li>
-      <li><code>preflight.py</code>: tokenizer, log-probs, GPU math</li>
-      <li>Viability check: eval <i>before</i> + <i>teacher</i></li>
+      <li>Serve the 9B teacher (vLLM, bf16, TP=2, GPUs 0–1)</li>
+      <li>Eval the teacher, then each candidate via the sampler</li>
+      <li>GSM8K: <b>9B 94.3%</b> · <b>2B 74.8%</b> · <b>0.8B 52.0%</b></li>
+      <li>Comparison dashboard &rarr; <b>2B</b>: 20-pt gap; the 0.8B caps at ~65%</li>
     </ul>
   </div>
 
@@ -145,7 +145,7 @@
       <b>Teacher scores</b><small>log&nbsp;π<sub>teacher</sub> per token<br>on student's own text</small>
     </div>
     <div class="node trainer" style="left:682px; top:112px">
-      <b>Update student</b><small>whitened reverse KL<br>answer masked · LR 2e-5</small>
+      <b>Update student</b><small>whitened reverse KL<br>answer masked · LoRA r=128</small>
     </div>
 
     <div class="side">
@@ -161,7 +161,7 @@
     <ul>
       <li><code>eval_student.py</code> on Inspect AI</li>
       <li>GSM8K, all 1,319 rows, 4-shot, greedy, <code>#### N</code> match</li>
-      <li>Three phases: <b>before</b> · <b>after</b> · <b>teacher</b></li>
+      <li><b>after</b> per checkpoint; <b>before</b> + <b>teacher</b> reused from step 4</li>
       <li><code>summary.json</code>, <code>samples_&lt;phase&gt;.jsonl</code> on <code>/fsx</code></li>
       <li>Student phases via the sampler, teacher via its Service</li>
     </ul>
@@ -169,19 +169,19 @@
 
   <div class="card run dash">
     <h2><span class="num">7</span>Eval dashboard</h2>
-    <div class="where">Notebook · built from the Job log</div>
+    <div class="where">Notebook · from <code>summary.json</code> on <code>/fsx</code></div>
     <div class="bars">
-      <div class="ceiling" style="bottom:118px"><span>teacher 94.5% = ceiling</span></div>
-      <div class="bar" style="left:40px;  height:53px; background:var(--grey)"></div>
-      <div class="bar" style="left:150px; height:66px; background:var(--orange)"></div>
+      <div class="ceiling" style="bottom:118px"><span>teacher 94.3% = ceiling</span></div>
+      <div class="bar" style="left:40px;  height:76px; background:var(--grey)"></div>
+      <div class="bar" style="left:150px; height:85px; background:var(--orange)"></div>
       <div class="bar" style="left:260px; height:96px; background:var(--navy)"></div>
-      <div class="bar-lbl" style="left:40px">52.0%</div>
-      <div class="bar-lbl" style="left:150px">64.7%</div>
-      <div class="bar-lbl" style="left:260px">94.5%</div>
+      <div class="bar-lbl" style="left:40px">74.8%</div>
+      <div class="bar-lbl" style="left:150px">84.0%</div>
+      <div class="bar-lbl" style="left:260px">94.3%</div>
     </div>
     <div class="formula"><b>headroom recovered</b> = (after − before) ÷ (teacher − before)</div>
     <ul>
-      <li>before → after (step 100): <b>+12.7 pp</b>, 29.8% of the gap; 261 fixed vs. 94 broken</li>
+      <li>2B before → after (step 25): <b>+9.2 pp</b>, 47% of the gap; 195 fixed vs. 73 broken</li>
     </ul>
   </div>
 

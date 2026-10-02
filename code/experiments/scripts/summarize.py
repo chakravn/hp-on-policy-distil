@@ -1,10 +1,10 @@
 """Compare eval checkpoints with the base student and teacher on the same GSM8K problems.
 
 Run inside any pod that mounts /fsx:  python3 summarize.py <name>=<eval_dir>/samples_after.jsonl ...
-BASE_DIR selects the baseline (default /fsx/opd/baseline-gsm8k: 0.8B before + 9B teacher).
+BASE_DIR selects the baseline (default /fsx/opd/baseline-gsm8k-2b: 2B before + 9B teacher; /fsx/opd/baseline-gsm8k for the 0.8B).
 """
 import json, math, sys, os
-BASE=os.environ.get("BASE_DIR", "/fsx/opd/baseline-gsm8k")
+BASE=os.environ.get("BASE_DIR", "/fsx/opd/baseline-gsm8k-2b")
 L=lambda p:{r["id"]:r for r in map(json.loads,open(p))}
 B=L(f"{BASE}/samples_before.jsonl"); T=L(f"{BASE}/samples_teacher.jsonl")
 bb=sum(v["correct"] for v in B.values())/len(B); tt=sum(v["correct"] for v in T.values())/len(T)

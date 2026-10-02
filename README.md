@@ -2,10 +2,11 @@
 
 ![Workflow: code to eval dashboard](slides/workflow.png)
 
-Distils **Qwen3.5-9B** into **Qwen3.5-0.8B** on GSM8K with on-policy distillation and no supervised
-warm-up: the student goes from **52.0% to ~65%** (all 1,319 test problems, greedy), closing ~30% of
-the gap to the teacher's 94.5%; it reaches that plateau within 25–50 steps. The same recipe takes
-Qwen3.5-2B from 74.8% to 84.0% (LoRA rank 128). Experiment history:
+Distils **Qwen3.5-9B** into **Qwen3.5-2B** (LoRA rank 128) on GSM8K with on-policy distillation and
+no supervised warm-up: the student goes from **74.8% to 84.0%** after 25 steps (all 1,319 test
+problems, greedy), closing 47% of the gap to the teacher's 94.3%. The workflow starts with a
+**baseline eval** of the teacher and each candidate student (9B 94.3%, 2B 74.8%, 0.8B 52.0%) and picks
+the student from a comparison dashboard: the 0.8B has a wider gap but plateaus at ~65%. Experiment history:
 [`code/experiments/`](code/experiments/). A more detailed version of the diagram is in
 [`slides/workflow-detailed.png`](slides/workflow-detailed.png).
 
@@ -349,15 +350,18 @@ depending on your repository layout) and pick the **Python 3 (ipykernel)** kerne
    kubectl get nodes -o custom-columns='NAME:.metadata.name,TYPE:.metadata.labels.node\.kubernetes\.io/instance-type'
    ```
 
-3. **Part 1 — Deploy the teacher.** Creates the `teacher-vllm` Deployment + ClusterIP
-   Service serving bf16 `Qwen/Qwen3.5-9B`, sharded over GPUs 0-1 (TP=2). Weights are pulled
-   from Hugging Face into the FSx cache (`HF_HOME=/fsx/hf_cache`) on first run, so
-   `rollout status` can take 10+ minutes.
+3. **Part 1 — Baseline eval and model selection.** Creates the `teacher-vllm` Deployment +
+   ClusterIP Service serving bf16 `Qwen/Qwen3.5-9B`, sharded over GPUs 0-1 (TP=2) — weights are
+   pulled from Hugging Face into the FSx cache (`HF_HOME=/fsx/hf_cache`) on first run, so
+   `rollout status` can take 10+ minutes. It then evaluates the teacher and each candidate student
+   (`Qwen/Qwen3.5-0.8B`, `Qwen/Qwen3.5-2B`; the sampler serves one at a time) on all 1,319 GSM8K
+   test problems, ~45 min in total, and draws a comparison dashboard that picks the student.
 
 4. **Part 2 — Launch the sampler and the student.** Applies the `student-sampler` vLLM
-   Deployment (GPU 3), syncs `src/` to `s3://$S3_BUCKET/opd/src` (the pod reads it at
-   `/s3/opd/src`) and submits the `opd-student` Job (GPU 2), which runs `preflight.py` and then
-   `train_distill.py`: 50 steps of 64 prompts × 4 rollouts, ~4.5 h.
+   Deployment (GPU 3) for the chosen student, syncs `src/` to `s3://$S3_BUCKET/opd/src` (the pod
+   reads it at `/s3/opd/src`) and submits the `opd-student` Job (GPU 2), which runs `preflight.py`
+   and then `train_distill.py`: 50 steps of 64 prompts × 4 rollouts, ~4.5 h (the accuracy plateau
+   is reached by step 25).
 
 5. **Part 3 — Monitor.** Plots `teacher_kl`, capped rollouts and rollout length from
    `${RUN_DIR}/metrics_rank0.jsonl`; re-run the cells to refresh. Read `teacher_kl` together with
@@ -365,8 +369,9 @@ depending on your repository layout) and pick the **Python 3 (ipykernel)** kerne
    Amazon Managed Prometheus — use the `GrafanaWorkspaceEndpoint` output if you created the
    Grafana workspace.
 
-6. **Part 4 — Evaluate.** Runs the base student, any `student-step<N>` checkpoint and the
-   teacher on all 1,319 GSM8K test problems and reports the share of the teacher gap closed.
+6. **Part 4 — Evaluate.** Scores each `student-step<N>` checkpoint on all 1,319 GSM8K test
+   problems, reusing the Part 1 baseline for the base student and the teacher, reports the share of
+   the teacher gap closed, and redraws the comparison dashboard with the distilled student added.
    It needs no GPU, so it can run while training continues.
 
 7. **Part 5 — Cleanup.** Deletes the Jobs, the sampler and the teacher, freeing the GPUs but

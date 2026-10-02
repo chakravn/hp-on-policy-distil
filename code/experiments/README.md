@@ -1,7 +1,8 @@
 # Experiments
 
 Tracking for every on-policy distillation run after the recipe first worked: what changed, and what
-it scored. Each run is `manifests/env_vars` plus the overrides in `configs/<run>.env`.
+it scored. Each run is `manifests/env_vars` plus the overrides in `configs/<run>.env`. The shipped
+`env_vars` defaults are **run17** (2B student, LoRA r=128), so `configs/run17.env` is now a no-op.
 
 All evals: GSM8K test split (1,319 problems), 4-shot, greedy, `#### N` answer match. *z* is the paired
 sign test against the base student on the same problems; "gap closed" is
@@ -9,12 +10,15 @@ sign test against the base student on the same problems; "gap closed" is
 
 ## Baselines
 
+Measured first, before any training (notebook Part 1): they pick the student and serve as the
+`before` and `teacher` phases of every later eval.
+
 | model | setting | accuracy |
 |---|---|---|
-| Qwen3.5-0.8B (student) | 4-shot `####` (shipped prompt) | **52.0%** |
-| Qwen3.5-9B (teacher) | 4-shot `####` | **94.5%** (94.3% on a re-run) |
-| Qwen3.5-2B (student, run16) | 4-shot `####` | **74.8%** |
-| Qwen3.5-4B (student candidate) | 4-shot `####` | **92.8%** (teacher 94.6% on the same run — too small a gap to distil) |
+| Qwen3.5-9B (teacher) | 4-shot `####` (shipped prompt) | **94.3%** (94.5–94.6% on other runs) |
+| **Qwen3.5-2B (student — chosen)** | 4-shot `####` | **74.8%** — 19.6 pp gap, 276 teacher-solved problems missed |
+| Qwen3.5-0.8B (candidate) | 4-shot `####` | **52.0%** — wider gap (567 missed), but it plateaus at ~65% |
+| Qwen3.5-4B (candidate) | 4-shot `####` | **92.8%** — too small a gap to distil (52 missed) |
 | Qwen3.5-0.8B / 9B | zero-shot `\boxed{}` (`TASK=gsm8k_native`) | 55.1% / 94.3% |
 | Qwen3.5-0.8B / 9B | thinking mode, first 500 problems, 3,500 tokens | 37.4% / 87.4% (0.8B: 78% hit the cap) |
 
@@ -26,7 +30,8 @@ sign test against the base student on the same problems; "gap closed" is
 | run14 | [`configs/run14.env`](configs/run14.env) | 200 steps | 65.8% (step 125), z = +9.54 | 63.5–65.8% from step 50 to 200 |
 | run15 | [`configs/run15.env`](configs/run15.env) | LR 2e-5 | 65.1% (step 75), z = +8.98 | 63.5–65.1% from step 25 |
 | run16 | [`configs/run16.env`](configs/run16.env) | **2B student**, LR 2e-5, 50 steps | **83.2%** (steps 25 and 50), z = +7.26 | 83.2% from step 25 — **43% of the gap** |
-| run17 | [`configs/run17.env`](configs/run17.env) | 2B with **LoRA rank 128** (alpha 256) | **84.0%** (step 25), z = +7.45 | 83.9% at step 50 — **47% of the gap** |
+| run17 | [`configs/run17.env`](configs/run17.env) | 2B with **LoRA rank 128** (alpha 256) — **shipped** | **84.0%** (step 25), z = +7.45 | 83.9% at step 50 — **47% of the gap** |
+| run18 | [`configs/run18.env`](configs/run18.env) | run17 sampled at **T=1.0**, **8 samples × 32 prompts** | 84.4% (step 50), z = +7.77 | 82.6% at step 25 — a tie with run17 within noise |
 
 Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
 
@@ -47,23 +52,29 @@ Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
 - **The adapter is not the main limit.** Rank 128 adds +0.8 pp over rank 32 (84.0% vs 83.2%, within
   ~1 SE), again plateauing by step 25; answer marker 94%, capped 6%.
 - **The 4B is not worth distilling here**: at 92.8% it is within 1.8 pp of the teacher.
+- **Exactly on-policy sampling does not raise the ceiling.** T=1.0 with 8 samples per prompt (run18)
+  lags at step 25 (half as many distinct prompts seen) and ties run17 at step 50 (84.4% vs. 84.0%,
+  ~5 problems). It stays stable: capped rollouts fall from 17% to 8% during training.
+
+Next (in progress): `TOPK_KL=20` (run19) — a KL to the teacher's top-20 next-token distribution at
+every completion position, a denser signal than the sampled-token reverse KL.
 
 ## Reproducing
 
 ```bash
 cd code
-set -a && source manifests/env_vars && source experiments/configs/run15.env && set +a
+set -a && source manifests/env_vars && source experiments/configs/run18.env && set +a
 envsubst < manifests/opd-config.yaml-template        | kubectl --context "$CTX" apply -f -
 envsubst < manifests/student-distill-job.yaml-template | kubectl --context "$CTX" apply -f -
 
 # evaluate checkpoints as they appear (each eval needs no GPU and runs alongside training)
 CRED_REFRESH_CMD='<your credential refresh command>' \
-  experiments/scripts/eval_steps.sh "$RUN_DIR" run15 25 50 75 100
+  experiments/scripts/eval_steps.sh "$RUN_DIR" run18 25 50
 ```
 
-Changing `STUDENT_MODEL` (run16) also means re-applying `manifests/student-sampler.yaml-template` and
-measuring that student's baseline first (`EVAL_PHASE=before,teacher`, with `BASE_DIR` pointing the
-scripts at it).
+Changing `STUDENT_MODEL` or `LORA_R` also means re-applying `manifests/student-sampler.yaml-template`
+(`--max-lora-rank` follows `LORA_R`), and a new student needs its baseline first (notebook Part 1,
+with `BASE_DIR` pointing the scripts at it).
 
 | script | purpose |
 |---|---|
