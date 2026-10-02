@@ -14,6 +14,7 @@ sign test against the base student on the same problems; "gap closed" is
 | Qwen3.5-0.8B (student) | 4-shot `####` (shipped prompt) | **52.0%** |
 | Qwen3.5-9B (teacher) | 4-shot `####` | **94.5%** (94.3% on a re-run) |
 | Qwen3.5-2B (student, run16) | 4-shot `####` | **74.8%** |
+| Qwen3.5-4B (student candidate) | 4-shot `####` | **92.8%** (teacher 94.6% on the same run — too small a gap to distil) |
 | Qwen3.5-0.8B / 9B | zero-shot `\boxed{}` (`TASK=gsm8k_native`) | 55.1% / 94.3% |
 | Qwen3.5-0.8B / 9B | thinking mode, first 500 problems, 3,500 tokens | 37.4% / 87.4% (0.8B: 78% hit the cap) |
 
@@ -25,6 +26,7 @@ sign test against the base student on the same problems; "gap closed" is
 | run14 | [`configs/run14.env`](configs/run14.env) | 200 steps | 65.8% (step 125), z = +9.54 | 63.5–65.8% from step 50 to 200 |
 | run15 | [`configs/run15.env`](configs/run15.env) | LR 2e-5 | 65.1% (step 75), z = +8.98 | 63.5–65.1% from step 25 |
 | run16 | [`configs/run16.env`](configs/run16.env) | **2B student**, LR 2e-5, 50 steps | **83.2%** (steps 25 and 50), z = +7.26 | 83.2% from step 25 — **43% of the gap** |
+| run17 | [`configs/run17.env`](configs/run17.env) | 2B with **LoRA rank 128** (alpha 256) | **84.0%** (step 25), z = +7.45 | 83.9% at step 50 — **47% of the gap** |
 
 Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
 
@@ -42,8 +44,9 @@ Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
   its gap versus ~30% for the 0.8B, and ends 17 pp above the best distilled 0.8B. It also plateaus by
   step 25 at LR 2e-5, and it is the cleanest run: answer marker 92%, capped 7–8%, no length drift.
 
-Next: the 4B student (baseline first — if it is already near 90% the remaining gap is small), and
-LoRA rank 128 on the 2B to test whether the adapter limits it.
+- **The adapter is not the main limit.** Rank 128 adds +0.8 pp over rank 32 (84.0% vs 83.2%, within
+  ~1 SE), again plateauing by step 25; answer marker 94%, capped 6%.
+- **The 4B is not worth distilling here**: at 92.8% it is within 1.8 pp of the teacher.
 
 ## Reproducing
 

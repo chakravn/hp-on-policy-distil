@@ -7,8 +7,8 @@ model and no supervised warm-up. Everything runs on **one `ml.g5.24xlarge`** (4�
 
 **Result** (all 1,319 GSM8K test problems, greedy): **52.0% → ~65%**, closing **~30%** of the gap to
 the teacher's 94.5%. Every run plateaus at 64–66% (best 65.8%, z = +9.54); with `LR=2e-5` the
-student gets there by step 25. A **2B student** goes 74.8% → **83.2%** with the same recipe (43% of
-its gap). Per-run configs and results are in [`experiments/`](experiments/).
+student gets there by step 25. A **2B student** goes 74.8% → **84.0%** with the same recipe and LoRA
+rank 128 (47% of its gap). Per-run configs and results are in [`experiments/`](experiments/).
 
 **Target cluster:** `hp-cluster-onpolicy-distillation` (instantstart) · EKS, `us-west-2`, ns
 `default`. Storage: **FSx `/fsx` (`fsx-claim`) = high-throughput working store** (HF cache,

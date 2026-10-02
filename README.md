@@ -5,7 +5,7 @@
 Distils **Qwen3.5-9B** into **Qwen3.5-0.8B** on GSM8K with on-policy distillation and no supervised
 warm-up: the student goes from **52.0% to ~65%** (all 1,319 test problems, greedy), closing ~30% of
 the gap to the teacher's 94.5%; it reaches that plateau within 25–50 steps. The same recipe takes
-Qwen3.5-2B from 74.8% to 83.2%. Experiment history:
+Qwen3.5-2B from 74.8% to 84.0% (LoRA rank 128). Experiment history:
 [`code/experiments/`](code/experiments/). A more detailed version of the diagram is in
 [`slides/workflow-detailed.png`](slides/workflow-detailed.png).
 
