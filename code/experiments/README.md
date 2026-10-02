@@ -12,7 +12,8 @@ sign test against the base student on the same problems; "gap closed" is
 | model | setting | accuracy |
 |---|---|---|
 | Qwen3.5-0.8B (student) | 4-shot `####` (shipped prompt) | **52.0%** |
-| Qwen3.5-9B (teacher) | 4-shot `####` | **94.5%** |
+| Qwen3.5-9B (teacher) | 4-shot `####` | **94.5%** (94.3% on a re-run) |
+| Qwen3.5-2B (student, run16) | 4-shot `####` | **74.8%** |
 | Qwen3.5-0.8B / 9B | zero-shot `\boxed{}` (`TASK=gsm8k_native`) | 55.1% / 94.3% |
 | Qwen3.5-0.8B / 9B | thinking mode, first 500 problems, 3,500 tokens | 37.4% / 87.4% (0.8B: 78% hit the cap) |
 
@@ -23,7 +24,7 @@ sign test against the base student on the same problems; "gap closed" is
 | run13 | [`configs/run13.env`](configs/run13.env) | first working recipe: LR 1e-5, 100 steps | 64.7% (step 100), z = +8.86 | still rising at 100 |
 | run14 | [`configs/run14.env`](configs/run14.env) | 200 steps | 65.8% (step 125), z = +9.54 | 63.5–65.8% from step 50 to 200 |
 | run15 | [`configs/run15.env`](configs/run15.env) | LR 2e-5 | 65.1% (step 75), z = +8.98 | 63.5–65.1% from step 25 |
-| run16 | [`configs/run16.env`](configs/run16.env) | 2B student, LR 2e-5, 50 steps | *running* | |
+| run16 | [`configs/run16.env`](configs/run16.env) | **2B student**, LR 2e-5, 50 steps | **83.2%** (steps 25 and 50), z = +7.26 | 83.2% from step 25 — **43% of the gap** |
 
 Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
 
@@ -37,9 +38,12 @@ Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
   represent the 9B's distribution, so its reverse KL has a high floor.
 - **Shipped defaults** follow from this: `LR=2e-5`, `STEPS=50` — the same accuracy in ~4.5 h instead of 9.
 - **Thinking mode hurts** with this prompt: the 0.8B thinks until it hits the token cap.
+- **A larger student lifts the ceiling.** The 2B goes 74.8% → 83.2% (+8.5 pp, z = +7.26), closing 43% of
+  its gap versus ~30% for the 0.8B, and ends 17 pp above the best distilled 0.8B. It also plateaus by
+  step 25 at LR 2e-5, and it is the cleanest run: answer marker 92%, capped 7–8%, no length drift.
 
-Next: run16 (2B student) tests whether a larger student lifts the plateau; LoRA rank 128 on the 0.8B
-would test whether the adapter, not the model size, is the limit.
+Next: the 4B student (baseline first — if it is already near 90% the remaining gap is small), and
+LoRA rank 128 on the 2B to test whether the adapter limits it.
 
 ## Reproducing
 
