@@ -18,23 +18,24 @@ actually reflects how well distillation worked:
 
 CHOOSING THE TASK AND SAMPLE COUNT
 ----------------------------------
-Pick a task with real headroom for the student: GSM8K for the 0.8B (base 52% vs teacher
-94.5%), MATH-500 for a 4B (GSM8K saturates above 80% there). Always evaluate the whole test
+Pick a task with real headroom for the student: GSM8K for a 0.8B or 2B (bases 52% / 75% vs teacher
+94%), MATH-500 for a 4B (it scores 93% on GSM8K). Always evaluate the whole test
 set -- at n=100 the standard error is ~+-5pp, wider than most distillation gains; at
 GSM8K's n=1319 it is ~+-1.4pp.
 
 Prompt construction, answer extraction and answer equivalence all come from `prompts.py`,
-the *same* module `train_distill.py` uses. That is deliberate: the
-original code had two independent copies of the prompt format, they drifted, and the student
+the *same* module `train_distill.py` uses. That is deliberate: the original code had two
+independent copies of the prompt format, they drifted, and the student
 was optimised in a format it was never evaluated in.
 
-Run all three phases in one pod::
+Run all three phases in one pod (the Job takes every flag from the ConfigMap instead)::
 
     python3 eval_student.py --phase all \
-        --base-model Qwen/Qwen3.5-0.8B \
-        --ft-model-dir /fsx/opd/gsm8k-opd/student-final \
+        --base-model Qwen/Qwen3.5-2B \
+        --ft-model-dir /fsx/opd/gsm8k-opd/student-step25 \
+        --student-url http://student-sampler:8000/v1 \
         --teacher-url http://teacher-vllm:8000/v1 --teacher-model Qwen/Qwen3.5-9B \
-        --task gsm8k --limit 1319 --output-dir /fsx/opd/eval-gsm8k-opd
+        --task gsm8k --limit 1319 --fewshot 4 --votes 8 --output-dir /fsx/opd/eval-gsm8k-opd
 
 Outputs, all under ``$EVAL_DIR``:
 
@@ -54,6 +55,17 @@ Scoring is by *semantic* answer equivalence, not string equality (see
 '\\frac{3}{4}'), decoration ('50%', '\\left') and wording ('seventy-two' / '72') do not cost
 a point. Each row's ``match`` field and the per-phase ``lenient_matches`` count say how much
 accuracy came from the tolerant paths.
+
+MAJORITY VOTE (self-consistency)
+--------------------------------
+``--votes k`` (EVAL_VOTES) samples every problem k times at ``--vote-temperature`` (> 0) and
+scores the most common final answer, for the phases in ``--vote-phases`` (EVAL_VOTE_PHASES,
+default ``after``); the other phases decode with ``--temperature`` (greedy by default). The
+shipped headline votes on the distilled student only -- greedy base, voted distilled, greedy
+teacher -- so every result records its ``decoding`` and the dashboards label it. Each voted
+row keeps its k answers, so ``maj_at`` (majority accuracy over the first 1..k votes) and
+``pass_at_k`` (any vote correct) come from the same run. A phase is only carried forward
+when its recorded decoding matches what this run would use for it.
 """
 
 from __future__ import annotations
@@ -61,13 +73,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections import Counter
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from inspect_ai import Task, eval as inspect_eval, task
+from inspect_ai import Epochs, Task, eval as inspect_eval, task
 from inspect_ai.model import get_model
 from inspect_ai.dataset import Sample, hf_dataset
 from inspect_ai.scorer import (
@@ -76,6 +89,7 @@ from inspect_ai.scorer import (
     Score,
     Target,
     accuracy,
+    score_reducer,
     scorer,
     stderr,
 )
@@ -205,6 +219,39 @@ def final_answer_match(
     return score
 
 
+def _vote_key(answer: str | None) -> str:
+    """Normalised final answer for counting votes ('1,000' and '1000' are one vote)."""
+    return (clean_number(answer) or answer or "").strip()
+
+
+def majority_of(answers: list[str | None], correct: list[bool]) -> tuple[str | None, bool, float]:
+    """(winning answer, its correctness, vote share) among the parsed answers.
+
+    Unparsed answers abstain; ties go to the answer seen first. All votes for one normalised
+    answer share its correctness, so the winner's first occurrence decides.
+    """
+    counts = Counter(_vote_key(a) for a in answers if a)
+    if not counts:
+        return None, False, 0.0
+    top, n = counts.most_common(1)[0]
+    i = next(i for i, a in enumerate(answers) if a and _vote_key(a) == top)
+    return answers[i], correct[i], n / len(answers)
+
+
+@score_reducer(name="majority_vote")
+def majority_vote():
+    """Inspect epoch reducer: the most common final answer across a sample's epochs."""
+
+    def reduce(scores: list[Score]) -> Score:
+        answers = [s.answer or None for s in scores]
+        correct = [str(s.value) == CORRECT for s in scores]
+        answer, ok, share = majority_of(answers, correct)
+        return Score(value=CORRECT if ok else INCORRECT, answer=answer or "",
+                     metadata={"vote_share": share})
+
+    return reduce
+
+
 @task
 def math_reasoning(
     task_key: str = "math500",
@@ -216,6 +263,7 @@ def math_reasoning(
     shuffle_seed: int = 42,
     answer_rel_tol: float = DEFAULT_ANSWER_REL_TOL,
     text_similarity: float = DEFAULT_TEXT_SIMILARITY,
+    votes: int = 1,
 ) -> Task:
     """Final-answer accuracy on the task's held-out test split.
 
@@ -245,6 +293,7 @@ def math_reasoning(
         dataset=samples,
         solver=generate(),
         scorer=final_answer_match(spec.answer_style, answer_rel_tol, text_similarity),
+        epochs=Epochs(votes, majority_vote()) if votes > 1 else None,
     )
 
 
@@ -285,7 +334,7 @@ def model_args_for(model_ref: str, phase: str, args: argparse.Namespace) -> tupl
         "torch_dtype": args.torch_dtype,
         "trust_remote_code": args.trust_remote_code,
         # temperature=0 only means greedy if sampling is off.
-        "do_sample": args.temperature > 0,
+        "do_sample": decoding_for(phase, args)[1] > 0,
     }
     if args.chat_template == "auto":
         # Qwen3.5's template turns thinking OFF only for an explicit `enable_thinking=False`;
@@ -352,30 +401,64 @@ def load_served_adapter(adapter_dir: Path, args: argparse.Namespace) -> str:
 
 
 def per_sample_records(log: Any) -> list[dict[str, Any]]:
-    """Flatten the Inspect log into one compact row per sample -- the dashboard's input."""
-    rows: list[dict[str, Any]] = []
-    for sample in log.samples or []:
-        score = next(iter((sample.scores or {}).values()), None)
-        meta = (score.metadata or {}) if score else {}
-        usage = getattr(sample.output, "usage", None)
-        rows.append({
-            "id": str(sample.id),
-            "target": sample.target if isinstance(sample.target, str) else str(sample.target),
-            "answer": (score.answer if score else None) or None,
-            "correct": bool(score and str(score.value) == CORRECT),
-            # How the scorer matched: exact / tolerance / similarity / *_mismatch / missing.
-            "match": meta.get("match"),
-            "output_tokens": getattr(usage, "output_tokens", None),
-            # Did the model follow the answer-format instruction, and did we parse anything?
-            "has_marker": bool(meta.get("has_marker")),
-            "parsed": bool(score and score.answer),
-            "seconds": round(sample.total_time or 0.0, 2),
+    """Flatten the Inspect log into one compact row per sample -- the dashboard's input.
+
+    With --votes the log holds one entry per (sample, epoch): those are folded into one row
+    whose answer is the majority, keeping every vote for the maj@k / pass@k curves.
+    """
+    rows = [_sample_row(s) for s in log.samples or []]
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_id.setdefault(r["id"], []).append(r)
+    if all(len(g) == 1 for g in by_id.values()):
+        for r in rows:
+            del r["epoch"]
+        return rows
+    voted = []
+    for sid, group in by_id.items():
+        group.sort(key=lambda r: r["epoch"])
+        for r in group:
+            del r["epoch"]
+        answers, correct = [r["answer"] for r in group], [r["correct"] for r in group]
+        answer, ok, share = majority_of(answers, correct)
+        first = next((r for r in group if r["answer"] and _vote_key(r["answer"]) == _vote_key(answer)),
+                     group[0])
+        tokens = [r["output_tokens"] for r in group if r["output_tokens"] is not None]
+        voted.append({
+            **first, "id": sid, "answer": answer, "correct": ok,
+            "output_tokens": round(sum(tokens) / len(tokens), 1) if tokens else None,
+            "seconds": round(sum(r["seconds"] for r in group), 2),
+            "votes": answers, "votes_correct": correct, "vote_share": round(share, 3),
         })
-    return rows
+    return voted
+
+
+def _sample_row(sample: Any) -> dict[str, Any]:
+    score = next(iter((sample.scores or {}).values()), None)
+    meta = (score.metadata or {}) if score else {}
+    usage = getattr(sample.output, "usage", None)
+    return {
+        "id": str(sample.id),
+        "target": sample.target if isinstance(sample.target, str) else str(sample.target),
+        "answer": (score.answer if score else None) or None,
+        "correct": bool(score and str(score.value) == CORRECT),
+        # How the scorer matched: exact / tolerance / similarity / *_mismatch / missing.
+        "match": meta.get("match"),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        # Did the model follow the answer-format instruction, and did we parse anything?
+        "has_marker": bool(meta.get("has_marker")),
+        "parsed": bool(score and score.answer),
+        "seconds": round(sample.total_time or 0.0, 2),
+        "epoch": getattr(sample, "epoch", 1),
+    }
 
 
 def sample_transitions(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> dict[str, int]:
-    """Paired per-sample outcome: what distillation fixed vs. broke (same samples, greedy)."""
+    """Paired per-sample outcome: what distillation fixed vs. broke on the same samples.
+
+    Both phases' decoding is recorded in their results: with a voted `after` the flips include
+    what the vote adds.
+    """
     after_by_id = {r["id"]: r for r in after}
     counts = {"fixed": 0, "broken": 0, "both_correct": 0, "both_wrong": 0}
     for b in before:
@@ -409,6 +492,22 @@ def aggregate_extras(rows: list[dict[str, Any]]) -> dict[str, Any]:
         # matching. `math_verify` covers sympy-based symbolic equivalence (added when
         # switching from the hand-rolled scorer).
         "lenient_matches": sum(r["match"] in {"tolerance", "similarity", "math_verify"} for r in rows),
+        **vote_metrics(rows),
+    }
+
+
+def vote_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """maj@1..k and pass@k from the per-row votes (empty for greedy phases)."""
+    if not rows or "votes" not in rows[0]:
+        return {}
+    k = min(len(r["votes"]) for r in rows)
+    maj = {j: sum(majority_of(r["votes"][:j], r["votes_correct"][:j])[1] for r in rows) / len(rows)
+           for j in range(1, k + 1)}
+    return {
+        "votes": k,
+        "maj_at": {str(j): round(a, 4) for j, a in maj.items()},
+        "pass_at_k": round(sum(any(r["votes_correct"]) for r in rows) / len(rows), 4),
+        "mean_vote_share": round(sum(r["vote_share"] for r in rows) / len(rows), 3),
     }
 
 
@@ -455,6 +554,13 @@ def free_gpu() -> None:
         pass
 
 
+def decoding_for(phase: str, args: argparse.Namespace) -> tuple[int, float]:
+    """(votes, temperature) for one phase: voting phases sample, the rest use --temperature."""
+    if args.votes > 1 and phase in args.vote_phases:
+        return args.votes, args.vote_temperature
+    return 1, args.temperature
+
+
 def _run_inspect(phase, model, model_args, chat_template, connections, spec, args):
     # A served model's chat template runs server-side in vLLM; chat_template_kwargs is how
     # an OpenAI-compatible request reaches it. Same thinking switch as the local phases.
@@ -472,12 +578,13 @@ def _run_inspect(phase, model, model_args, chat_template, connections, spec, arg
             shuffle_seed=args.shuffle_seed,
             answer_rel_tol=args.answer_rel_tol,
             text_similarity=args.text_similarity,
+            votes=decoding_for(phase, args)[0],
         ),
         model=model,
         model_args=model_args,
         log_dir=str(Path(args.output_dir) / "logs" / phase),
         max_tokens=args.max_tokens,
-        temperature=args.temperature,
+        temperature=decoding_for(phase, args)[1],
         max_connections=connections,
         # From the task spec, so a few-shot completion cannot run on into a hallucinated
         # next problem -- and so train and eval agree on where a rollout ends.
@@ -518,6 +625,7 @@ def summarise_phase(
         "log_file": log.location,
         "samples_file": str(samples_path),
         "seconds": round(time.time() - t0, 1),
+        "decoding": dict(zip(("votes", "temperature"), decoding_for(phase, args))),
         **aggregate_extras(rows),
     }
     print(f"=== [{phase}] accuracy={result['accuracy']} "
@@ -552,6 +660,11 @@ def carry_forward(
         # `after` must be the same checkpoint, or the old number describes another model.
         if phase == "after" and result.get("model") != args.ft_model_dir:
             continue
+        # ...and decoded the same way (results written before `decoding` existed were single
+        # answers at the config temperature).
+        prev_decoding = result.get("decoding") or {"votes": 1, "temperature": prev["config"]["temperature"]}
+        if (prev_decoding["votes"], prev_decoding["temperature"]) != decoding_for(phase, args):
+            continue
         samples_file = Path(result.get("samples_file", ""))
         if not samples_file.is_file():
             continue
@@ -569,8 +682,8 @@ def main() -> int:
                     help="comma-separated subset of before,after,teacher -- or 'all'/'both' "
                          "(default: all three, then diff)")
     ap.add_argument("--task", choices=sorted(TASK_SPECS), default=env("TASK", "math500"),
-                    help="gsm8k suits a 0.8B student; math500 has headroom for a 4B")
-    ap.add_argument("--base-model", default=env("EVAL_BASE_MODEL", env("STUDENT_MODEL", "Qwen/Qwen3.5-0.8B")),
+                    help="gsm8k suits a 0.8B-2B student; math500 has headroom for a 4B")
+    ap.add_argument("--base-model", default=env("EVAL_BASE_MODEL", env("STUDENT_MODEL", "Qwen/Qwen3.5-2B")),
                     help="pre-distillation student: HF Hub id or local dir")
     ap.add_argument("--ft-model-dir", default=env("EVAL_FT_MODEL_DIR", "/fsx/opd/gsm8k-opd/student-final"),
                     help="post-distillation checkpoint (merged weights) from train_distill.py")
@@ -606,6 +719,14 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=int(env("EVAL_MAX_TOKENS", "512")))
     ap.add_argument("--temperature", type=float, default=float(env("EVAL_TEMPERATURE", "0")),
                     help="0 = greedy decoding (deterministic before/after comparison)")
+    ap.add_argument("--votes", type=int, default=int(env("EVAL_VOTES", "1")),
+                    help="majority vote over this many samples per problem for the "
+                         "--vote-phases; 1 = a single answer per problem")
+    ap.add_argument("--vote-phases", default=env("EVAL_VOTE_PHASES", "after"),
+                    help="comma-separated phases that vote (default: after), or 'all'")
+    ap.add_argument("--vote-temperature", type=float,
+                    default=float(env("EVAL_VOTE_TEMPERATURE", "0.7")),
+                    help="sampling temperature of the voting phases (must be > 0)")
     ap.add_argument("--batch-size", type=int, default=int(env("EVAL_BATCH_SIZE", "8")),
                     help="samples generated concurrently (the HF provider batches them)")
     ap.add_argument("--device", default=env("EVAL_DEVICE", "cuda:0"))
@@ -625,6 +746,12 @@ def main() -> int:
     ap.add_argument("--summary-name", default=env("EVAL_SUMMARY_NAME", "summary.json"))
     args = ap.parse_args()
     args.enable_thinking = bool(args.enable_thinking)
+    args.vote_phases = (["before", "after", "teacher"] if args.vote_phases == "all" else
+                        [p.strip() for p in args.vote_phases.split(",") if p.strip()])
+    if args.votes > 1 and args.vote_temperature <= 0:
+        print("ERROR: --votes > 1 needs --vote-temperature > 0: greedy samples are all identical",
+              file=sys.stderr)
+        return 2
     if args.student_url and args.chat_template != "auto":
         print("ERROR: --student-url applies the server's chat template; it needs "
               "--chat-template auto", file=sys.stderr)

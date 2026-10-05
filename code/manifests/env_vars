@@ -7,11 +7,12 @@
 #
 # Shipped configuration (experiments/configs/run17.env): on-policy distillation of Qwen3.5-2B
 # (instruct, LoRA r=128) from Qwen3.5-9B on GSM8K -- no supervised warm-up. Measured result
-# (1,319 GSM8K test problems, greedy):
-#     base student 74.8%  ->  distilled 84.0% at step 25, 83.9% at step 50
-#     (teacher 94.5%; 47% of the gap). The 0.8B reaches only ~65% (30% of its gap).
+# (1,319 GSM8K test problems):
+#     base student 74.8% greedy  ->  distilled 89.2% with an 8-vote majority at step 25
+#     (84.0% greedy; 83.9% at step 50)  ->  teacher 94.3% greedy. 74% of the gap with the vote,
+#     47% greedy against greedy. The 0.8B reaches only ~65% greedy (30% of its gap).
 # The student was picked by a baseline eval of the candidates first (notebook Part 1):
-#     Qwen3.5-0.8B 52.0% · Qwen3.5-2B 74.8% · Qwen3.5-4B 92.8% · teacher Qwen3.5-9B 94.5%
+#     Qwen3.5-0.8B 52.0% · Qwen3.5-2B 74.8% · Qwen3.5-4B 92.8% · teacher Qwen3.5-9B 94.3%
 # Per-run configs and results: experiments/
 #
 # NOTE: the SageMaker notebook role has been granted EKS cluster-admin (AmazonEKSClusterAdminPolicy),
@@ -91,11 +92,13 @@ export TEACHER_MAX_NUM_SEQS=48                # per replica
 export TEACHER_MAX_LOGPROBS=20                # >= TOPK_KL; 1 is enough for the sampled-token loss
 
 # --- Images ---
-# `latest` is a moving tag. Once a build is known good, pin all three to it: preflight's
-# quantisation checks are only honest about the teacher because TRAIN_IMAGE is the same image.
-export VLLM_IMAGE=vllm/vllm-openai:latest
-export TRAIN_IMAGE=vllm/vllm-openai:latest    # torch + transformers + vllm; peft is pip-installed
-export EVAL_IMAGE=vllm/vllm-openai:latest     # inspect-ai is pip-installed
+# Pinned by digest to the build every result in experiments/ was produced with (vLLM 0.30).
+# `latest` is a moving tag: when it moved, a new eval pod pulled a second 8.4 GiB image next to
+# the teacher's, the node hit DiskPressure and the pod was evicted. One digest for all three also
+# keeps preflight's quantisation checks honest (TRAIN_IMAGE is the image the teacher runs).
+export VLLM_IMAGE=docker.io/vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+export TRAIN_IMAGE=${VLLM_IMAGE}              # torch + transformers + vllm; peft is pip-installed
+export EVAL_IMAGE=${VLLM_IMAGE}               # inspect-ai is pip-installed
 
 # --- Services (in-cluster DNS) ---
 export TEACHER_URL=http://teacher-vllm.$NAMESPACE.svc.cluster.local:8000/v1
@@ -221,6 +224,13 @@ export EVAL_SELECT=all                        # all | tail | head | shuffle
 export EVAL_FEWSHOT=4                         # must equal TRAIN_FEWSHOT
 export EVAL_MAX_TOKENS=1024                   # must not exceed MAX_NEW_TOKENS
 export EVAL_TEMPERATURE=0                     # greedy, so before/after compare the same samples deterministically
+# Majority vote (self-consistency): EVAL_VOTE_PHASES sample EVAL_VOTES answers per problem and score
+# the most common one; the other phases use EVAL_TEMPERATURE. Shipped: the distilled student votes,
+# the base and the teacher stay greedy -- 74.8% -> 89.2% (84.0% greedy) vs. 94.3% -- and every
+# result and chart records which decoding it used. EVAL_VOTES=1 = greedy everywhere.
+export EVAL_VOTES=8
+export EVAL_VOTE_PHASES=after                 # comma-separated subset of before,after,teacher, or all
+export EVAL_VOTE_TEMPERATURE=0.7              # = TRAIN_TEMPERATURE
 export EVAL_BATCH_SIZE=4                      # local HF provider only
 export EVAL_TEACHER_CONNECTIONS=32
 export EVAL_CHAT_TEMPLATE=auto                # must equal CHAT_TEMPLATE

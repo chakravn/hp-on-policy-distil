@@ -5,8 +5,11 @@ Distil a **teacher** (`Qwen/Qwen3.5-9B`, bf16, one whole copy sharded over TP=2)
 rollouts with **dense, per-token feedback** (reverse KL to the teacher). No verifier, no reward
 model and no supervised warm-up. Everything runs on **one `ml.g5.24xlarge`** (4× A10G 24 GB).
 
-**Result** (all 1,319 GSM8K test problems, greedy): **74.8% → 84.0%** after 25 steps, closing **47%**
-of the gap to the teacher's 94.3% (z = +7.45; 195 problems fixed, 73 broken). The student was
+**Result** (all 1,319 GSM8K test problems): base 2B **74.8%** greedy → distilled 2B **89.2% with an
+8-vote majority** after 25 steps (**84.0%** greedy) → teacher **94.3%** greedy. With the vote that is
+74% of the gap (z = +11.8; 226 problems fixed, 35 broken); greedy against greedy, 47% (z = +7.45).
+The vote (`EVAL_VOTES=8`, `EVAL_VOTE_PHASES=after`) samples 8 answers at temperature 0.7 and scores
+the most common one; it is a decoding choice, so the dashboards label it. The student was
 chosen by a **baseline eval** first — teacher 94.3%, `Qwen3.5-2B` 74.8%, `Qwen3.5-0.8B` 52.0%: the
 0.8B has the wider gap but plateaus at 64–66% (~30% of it) whatever the schedule. Per-run configs
 and results are in [`experiments/`](experiments/).
@@ -306,6 +309,13 @@ at the training temperature).
 was recorded with the same eval config, so the notebook measures `before` and `teacher` once in the
 Part 1 baseline (one directory per model, `/fsx/opd/baseline-<task>-<model>`) and runs only `after`
 for each checkpoint.
+
+**Majority vote.** `EVAL_VOTES=8` samples each problem 8 times at `EVAL_VOTE_TEMPERATURE` (0.7) and
+scores the most common final answer, for the phases in `EVAL_VOTE_PHASES` (default `after`; the
+others stay greedy). Each result records its `decoding`; voted results add `maj_at` (accuracy over
+the first 1..8 votes), `pass_at_k` and `mean_vote_share`, and a phase is only carried forward when
+its decoding matches. The shipped headline votes on the distilled student only — 74.8% greedy base →
+89.2% voted → 94.3% greedy teacher — and every chart labels it; set `EVAL_VOTES=1` for greedy.
 
 ```bash
 set -a && source manifests/env_vars && set +a

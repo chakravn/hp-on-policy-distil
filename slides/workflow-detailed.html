@@ -145,7 +145,7 @@
       <b>Teacher scores</b><small>log&nbsp;π<sub>teacher</sub> per token<br>on student's own text</small>
     </div>
     <div class="node trainer" style="left:682px; top:112px">
-      <b>Update student</b><small>whitened reverse KL<br>answer masked · LoRA r=128</small>
+      <b>Update student</b><small>whitened reverse KL<br>answer masked · r=128</small>
     </div>
 
     <div class="side">
@@ -160,10 +160,10 @@
     <div class="where">Part 4 · Job <code>opd-student-eval</code> (no GPU)</div>
     <ul>
       <li><code>eval_student.py</code> on Inspect AI</li>
-      <li>GSM8K, all 1,319 rows, 4-shot, greedy, <code>#### N</code> match</li>
-      <li><b>after</b> per checkpoint; <b>before</b> + <b>teacher</b> reused from step 4</li>
+      <li>GSM8K, all 1,319 rows, 4-shot, <code>#### N</code> match</li>
+      <li><b>after</b> per checkpoint, greedy; best one again with an <b>8-vote majority</b></li>
+      <li><b>before</b> + <b>teacher</b> reused (greedy) from step 4</li>
       <li><code>summary.json</code>, <code>samples_&lt;phase&gt;.jsonl</code> on <code>/fsx</code></li>
-      <li>Student phases via the sampler, teacher via its Service</li>
     </ul>
   </div>
 
@@ -173,15 +173,16 @@
     <div class="bars">
       <div class="ceiling" style="bottom:118px"><span>teacher 94.3% = ceiling</span></div>
       <div class="bar" style="left:40px;  height:76px; background:var(--grey)"></div>
-      <div class="bar" style="left:150px; height:85px; background:var(--orange)"></div>
+      <div class="bar" style="left:150px; height:91px; background:var(--orange)"></div>
       <div class="bar" style="left:260px; height:96px; background:var(--navy)"></div>
       <div class="bar-lbl" style="left:40px">74.8%</div>
-      <div class="bar-lbl" style="left:150px">84.0%</div>
+      <div class="bar-lbl" style="left:150px">89.2%*</div>
       <div class="bar-lbl" style="left:260px">94.3%</div>
     </div>
     <div class="formula"><b>headroom recovered</b> = (after − before) ÷ (teacher − before)</div>
     <ul>
-      <li>2B before → after (step 25): <b>+9.2 pp</b>, 47% of the gap; 195 fixed vs. 73 broken</li>
+      <li>2B, step 25: <b>+14.5 pp</b>, 74% of the gap; 226 fixed vs. 35 broken</li>
+      <li>*8-vote majority on the distilled student; greedy 84.0% (47%)</li>
     </ul>
   </div>
 

@@ -32,6 +32,22 @@ Measured first, before any training (notebook Part 1): they pick the student and
 | run16 | [`configs/run16.env`](configs/run16.env) | **2B student**, LR 2e-5, 50 steps | **83.2%** (steps 25 and 50), z = +7.26 | 83.2% from step 25 — **43% of the gap** |
 | run17 | [`configs/run17.env`](configs/run17.env) | 2B with **LoRA rank 128** (alpha 256) — **shipped** | **84.0%** (step 25), z = +7.45 | 83.9% at step 50 — **47% of the gap** |
 | run18 | [`configs/run18.env`](configs/run18.env) | run17 sampled at **T=1.0**, **8 samples × 32 prompts** | 84.4% (step 50), z = +7.77 | 82.6% at step 25 — a tie with run17 within noise |
+| run19 | [`configs/run19.env`](configs/run19.env) | run17 + **KL to the teacher's top-20 distribution** (`TOPK_KL=20`) | 84.2% (step 25), z = +7.87 | 83.5% at step 50 — a tie |
+| run20 | [`configs/run20.env`](configs/run20.env) | run17 with Qwen's **native zero-shot `\boxed{}` prompt** (base 77.9%) | 83.9% (step 50), z = +5.87 | 83.6% at step 25 — a tie; 37% of its smaller gap |
+
+**Decoding the shipped checkpoint with a majority vote** (run17, step 25; 8 samples at T=0.7, most
+common answer scored — `EVAL_VOTES=8`):
+
+| phases voting | base 2B | distilled 2B | teacher | gap closed |
+|---|---|---|---|---|
+| none (greedy) | 74.8% | 84.0% | 94.3% | 47% |
+| **`after` only — shipped headline** | 74.8% greedy | **89.2%** (z = +11.8; 226 fixed / 35 broken) | 94.3% greedy | **74%** |
+| all | 84.0% | 88.7% | 96.1% | 39% |
+
+The distilled student's accuracy by number of votes: 82.8% (1), 86.3% (3), 87.8% (4), 88.9% (6),
+89.2% (8); at least one of 8 is right on 94.9%. Two independent 8-vote runs agree on 94.6% of
+problems (88.7% and 89.2%). In the CSV the `capped` and `mean_tokens` of a voted row average the 8
+votes.
 
 Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
 
@@ -56,8 +72,13 @@ Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
   lags at step 25 (half as many distinct prompts seen) and ties run17 at step 50 (84.4% vs. 84.0%,
   ~5 problems). It stays stable: capped rollouts fall from 17% to 8% during training.
 
-Next (in progress): `TOPK_KL=20` (run19) — a KL to the teacher's top-20 next-token distribution at
-every completion position, a denser signal than the sampled-token reverse KL.
+- **A denser teacher signal does not either.** The top-20 KL (run19) ties: 84.2% / 83.5%.
+- **The prompt moves the base, not the plateau.** The native zero-shot `\boxed{}` prompt lifts the
+  base 2B by 3.1 pp (77.9%), but run20 ends at 83.9% — the same as run17.
+- **Every 2B variant ends at 83–84% greedy**, within ~1 SE: the ceiling is the student's capacity
+  with this teacher. What still moves the reported number is decoding: an 8-vote majority on the
+  distilled student gives 89.2%. A larger teacher (27B W4A16, documented in `env_vars`) is the
+  remaining lever for training.
 
 ## Reproducing
 
