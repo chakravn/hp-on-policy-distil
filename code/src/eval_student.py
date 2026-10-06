@@ -18,15 +18,14 @@ actually reflects how well distillation worked:
 
 CHOOSING THE TASK AND SAMPLE COUNT
 ----------------------------------
-Pick a task with real headroom for the student: GSM8K for a 0.8B or 2B (bases 52% / 75% vs teacher
-94%), MATH-500 for a 4B (it scores 93% on GSM8K). Always evaluate the whole test
+Pick a task with real headroom for the student: GSM8K for a 0.8B or 2B (bases 52% / 75% vs
+teacher 94%), MATH-500 for a 4B (it scores 93% on GSM8K). Always evaluate the whole test
 set -- at n=100 the standard error is ~+-5pp, wider than most distillation gains; at
 GSM8K's n=1319 it is ~+-1.4pp.
 
 Prompt construction, answer extraction and answer equivalence all come from `prompts.py`,
-the *same* module `train_distill.py` uses. That is deliberate: the original code had two
-independent copies of the prompt format, they drifted, and the student
-was optimised in a format it was never evaluated in.
+the *same* module `train_distill.py` uses, so the student is evaluated in exactly the format
+it was trained in.
 
 Run all three phases in one pod (the Job takes every flag from the ConfigMap instead)::
 
@@ -319,8 +318,8 @@ def model_args_for(model_ref: str, phase: str, args: argparse.Namespace) -> tupl
         # student-sampler vLLM. Two reasons over the local hf provider: minutes instead of
         # hours, and correct stopping -- Qwen3.5's config eos is <|endoftext|> while a chat
         # turn ends in <|im_end|>, so hf `generate` runs every sample to max_tokens and
-        # Inspect only trims the text afterwards (the 0.8B `before` phase took 109 min and
-        # reported ~2000 output tokens for ~300-token answers).
+        # Inspect only trims the text afterwards (hours per phase, and output-token counts
+        # several times the real answer length).
         os.environ[f"{STUDENT_PROVIDER.upper()}_BASE_URL"] = args.student_url
         os.environ.setdefault(f"{STUDENT_PROVIDER.upper()}_API_KEY", "EMPTY")
         name = model_ref if phase == "before" else load_served_adapter(Path(model_ref), args)

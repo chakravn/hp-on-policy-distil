@@ -36,8 +36,8 @@ the error, and every 4-bit 9B checkpoint on the Hub is a third-party build. bf16
 exact log-probs, at the cost of a second GPU and an all-reduce. And the alternatives on this
 hardware are closed:
 
-- In-flight 4-bit is gone. This pipeline used to serve a bf16 repo and let vLLM quantise it to NF4
-  during the load (`--quantization bitsandbytes`); vLLM has deleted bitsandbytes from its
+- In-flight 4-bit is gone. Letting vLLM quantise a bf16 repo to NF4 during the load
+  (`--quantization bitsandbytes`) no longer works: vLLM has deleted bitsandbytes from its
   quantization registry, and going back to a build that has it means going back before
   `Qwen3_5ForConditionalGeneration` existed — no image has both.
 - FP8/W8A8 is *refused*, not downgraded. A10G is sm_86 and `CompressedTensorsW8A8Fp8` declares

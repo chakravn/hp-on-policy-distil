@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base", default="Qwen/Qwen3.5-0.8B")
+    ap.add_argument("--base", default="Qwen/Qwen3.5-2B")
     ap.add_argument("--adapter", required=True, help="LoRA dir: student-stepN or adapter-live")
     ap.add_argument("--out", default=None, help="where to save the bf16 merge")
     ap.add_argument("--no-save", action="store_true")

@@ -58,9 +58,9 @@ not queue-bound.
 > ceiling, is the concern.
 >
 > **What is closed on this hardware:**
-> 1. **In-flight 4-bit is gone.** An earlier revision served a bf16 repo with
->    `--quantization bitsandbytes --load-format bitsandbytes`; vLLM deleted bitsandbytes from its
->    quantization registry, so the pod dies with `Unknown quantization method: bitsandbytes`.
+> 1. **In-flight 4-bit is gone.** Serving a bf16 repo with
+>    `--quantization bitsandbytes --load-format bitsandbytes` no longer works: vLLM deleted
+>    bitsandbytes from its quantization registry, so the pod dies with `Unknown quantization method: bitsandbytes`.
 >    Pinning an older image is not an escape hatch — `Qwen3_5ForConditionalGeneration` exists only
 >    in builds *newer* than the removal.
 > 2. **FP8/W8A8 is refused, not downgraded.** A10G is **sm_86** and vLLM's
@@ -141,8 +141,6 @@ src/
   train_distill.py                  # stage 1: the headless trainer the student Job runs
   eval_student.py                   # stage 2: Inspect AI eval, before/after/teacher (GSM8K or MATH-500)
   preflight.py                      # fails fast on the silent killers (see below)
-  gen_teacher_data.py               # optional: teacher solutions for the training split
-  sft_warmup.py                     # optional: LoRA supervised warm-up on those solutions
   compare_ckpts.py, merge_debug.py  # debug tools for checkpoints and LoRA merges
 manifests/
   env_vars                          # SINGLE source of truth: cluster, storage, models, both stages
@@ -152,7 +150,6 @@ manifests/
   student-sampler.yaml-template     # vLLM rollout sampler with LoRA hot-swap (GPU 3)
   student-distill-job.yaml-template  # stage 1 Job
   student-eval-job.yaml-template     # stage 2 Job (no GPU: HTTP to the sampler + teacher)
-  sft-job.yaml-template             # optional warm-up Jobs (teacher solutions, then SFT)
   LAUNCH.md                         # how to create resources (admin context / instantstart) + monitor
 ```
 
@@ -182,10 +179,9 @@ Qwen3.5 is **hybrid**: `layer_types` alternates 3 `linear_attention` layers to 1
 **24** hold a fixed recurrent (gated delta-net) state **per sequence**. Both terms are divided by TP.
 
 - **Per token**: `2 × 8 layers × 4 KV heads × 256 head_dim × 2 bytes` = **32 KiB**, and at TP=2
-  each rank holds half of it. An earlier revision of this table quoted 128 KiB/rank at TP=2 for
-  the 27B by counting *all* layers; the true figure is a quarter of that.
+  each rank holds half of it. Counting *all* layers instead would overstate it 4x.
 - **Per sequence**: `24 layers × 32 value heads × 128 × 128` in **fp32** (`mamba_ssm_dtype`) =
-  **48 MiB**, which the old accounting omitted entirely. At 24+ concurrent sequences it *dominates*
+  **48 MiB**. At 24+ concurrent sequences it *dominates*
   the per-token term, which is why the concurrency column is much lower than `cache ÷ 32 KiB ÷ 2048`
   would suggest.
 
@@ -231,7 +227,7 @@ adapter in **fp32**, which fits one 24 GB GPU (a 4B in fp32 with Adam would need
 The fp32 part is not optional: bf16 has 8 mantissa bits (~0.4% relative resolution), so an Adam
 step of magnitude ≈ `lr` rounds away to nothing and the optimizer silently does nothing at all.
 
-## `preflight.py` — the checks that would have caught the original result
+## `preflight.py` — catch silent failures before training
 Run automatically by the distill Job before training starts; exits non-zero on failure.
 
 1. **TP divisibility** — `num_key_value_heads % TP`, `num_attention_heads % TP`,
@@ -385,7 +381,7 @@ kubectl --context "$CTX" -n default get pods -o wide
   `distillation/` (`incorporate_kl_penalty`). Reverse-KL background: MiniLLM (arXiv:2306.08543).
 - **One honest divergence from those reports:** they pair on-policy distillation with an
   off-policy SFT warm-up rather than running it from a cold student. This pipeline runs
-  distillation only (an optional warm-up exists in `gen_teacher_data.py` + `sft_warmup.py`).
+  distillation only, from the pristine instruct student.
 
 **Not on-policy (useful contrast):** DeepSeek-R1/V3 and Kimi k1.5/k2 *distill off-policy* — SFT on
 teacher-generated traces. Gemma 2/3, Llama 3.2/4, NVIDIA Minitron use token-level KD on a **fixed

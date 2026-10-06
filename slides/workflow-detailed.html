@@ -125,8 +125,8 @@
     <ul>
       <li>Serve the 9B teacher (vLLM, bf16, TP=2, GPUs 0–1)</li>
       <li>Eval the teacher, then each candidate via the sampler</li>
-      <li>GSM8K: <b>9B 94.3%</b> · <b>2B 74.8%</b> · <b>0.8B 52.0%</b></li>
-      <li>Comparison dashboard &rarr; <b>2B</b>: 20-pt gap; the 0.8B caps at ~65%</li>
+      <li>Same 1,319 GSM8K problems for every model</li>
+      <li>Comparison dashboard &rarr; the strongest student that still leaves a real gap</li>
     </ul>
   </div>
 
@@ -171,18 +171,18 @@
     <h2><span class="num">7</span>Eval dashboard</h2>
     <div class="where">Notebook · from <code>summary.json</code> on <code>/fsx</code></div>
     <div class="bars">
-      <div class="ceiling" style="bottom:118px"><span>teacher 94.3% = ceiling</span></div>
+      <div class="ceiling" style="bottom:118px"><span>teacher = ceiling</span></div>
       <div class="bar" style="left:40px;  height:76px; background:var(--grey)"></div>
       <div class="bar" style="left:150px; height:91px; background:var(--orange)"></div>
       <div class="bar" style="left:260px; height:96px; background:var(--navy)"></div>
-      <div class="bar-lbl" style="left:40px">74.8%</div>
-      <div class="bar-lbl" style="left:150px">89.2%*</div>
-      <div class="bar-lbl" style="left:260px">94.3%</div>
+      <div class="bar-lbl" style="left:40px">base</div>
+      <div class="bar-lbl" style="left:150px">distilled</div>
+      <div class="bar-lbl" style="left:260px">teacher</div>
     </div>
     <div class="formula"><b>headroom recovered</b> = (after − before) ÷ (teacher − before)</div>
     <ul>
-      <li>2B, step 25: <b>+14.5 pp</b>, 74% of the gap; 226 fixed vs. 35 broken</li>
-      <li>*8-vote majority on the distilled student; greedy 84.0% (47%)</li>
+      <li>Paired per-problem outcome: fixed vs. broken</li>
+      <li>Distilled student greedy and with an 8-vote majority, labelled</li>
     </ul>
   </div>
 

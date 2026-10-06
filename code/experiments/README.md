@@ -72,13 +72,15 @@ Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
   lags at step 25 (half as many distinct prompts seen) and ties run17 at step 50 (84.4% vs. 84.0%,
   ~5 problems). It stays stable: capped rollouts fall from 17% to 8% during training.
 
-- **A denser teacher signal does not either.** The top-20 KL (run19) ties: 84.2% / 83.5%.
+- **A denser teacher signal does not either.** A KL to the teacher's top-20 next-token
+  distribution at every completion position (run19) tied: 84.2% / 83.5%. That loss is no longer in
+  the code.
 - **The prompt moves the base, not the plateau.** The native zero-shot `\boxed{}` prompt lifts the
-  base 2B by 3.1 pp (77.9%), but run20 ends at 83.9% — the same as run17.
-- **Every 2B variant ends at 83–84% greedy**, within ~1 SE: the ceiling is the student's capacity
-  with this teacher. What still moves the reported number is decoding: an 8-vote majority on the
-  distilled student gives 89.2%. A larger teacher (27B W4A16, documented in `env_vars`) is the
-  remaining lever for training.
+  base 2B by 3.1 pp (77.9%), but run20 ends at 83.9% -- the same as run17.
+- **Every 2B variant ends at 83-84% greedy**, within ~1 SE: the ceiling is the student's capacity
+  with this teacher. What still moves the reported number is decoding -- an 8-vote majority on the
+  distilled student gives 89.2% -- and a larger teacher (27B W4A16, documented in `env_vars`) is
+  the remaining lever for training.
 
 ## Reproducing
 

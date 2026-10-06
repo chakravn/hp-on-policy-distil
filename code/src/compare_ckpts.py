@@ -3,7 +3,7 @@
 Answers "what is actually in this directory?" -- e.g. whether an old `student-final-bf16`
 is a real distilled model or effectively the base, and how far two runs moved the weights.
 
-    python3 compare_ckpts.py --base Qwen/Qwen3.5-0.8B \
+    python3 compare_ckpts.py --base Qwen/Qwen3.5-2B \
         /fsx/opd/gsm8k-opd/student-final /fsx/opd/other-run/student-final
 
 Per checkpoint it prints: file timestamps, config (architectures, dtype), keys missing or
@@ -104,7 +104,7 @@ def compare(base_idx: dict, ck_idx: dict, top: int) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("checkpoints", nargs="+", help="merged checkpoint dirs to inspect")
-    ap.add_argument("--base", default="Qwen/Qwen3.5-0.8B")
+    ap.add_argument("--base", default="Qwen/Qwen3.5-2B")
     ap.add_argument("--top", type=int, default=8, help="most-changed tensors to list")
     args = ap.parse_args()
 
