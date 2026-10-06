@@ -4,11 +4,10 @@
 #   set -a && source manifests/env_vars && set +a
 #   envsubst < manifests/opd-config.yaml-template | kubectl --context "$CTX" apply -f -
 #
-# Why a ConfigMap instead of an `env:` list per Job: the original three manifests each
-# repeated their own subset of the variables, so adding a knob meant editing several files
-# and a pod could silently run with a stale value. Every CLI flag in src/*.py already
-# defaults from one of these names, so the Jobs now pass NO arguments at all -- this
-# ConfigMap is the entire interface, and `manifests/env_vars` is its only source.
+# Why a ConfigMap instead of an `env:` list per Job: one place to add a knob, and no pod can
+# run with a stale copy of a value. Every CLI flag in src/*.py defaults from one of these
+# names, so the Jobs pass NO arguments -- this ConfigMap is the entire interface, and
+# `manifests/env_vars` is its only source. A new variable must be listed here to reach a pod.
 #
 # After editing env_vars, re-apply this and delete/recreate the Jobs (Jobs are immutable,
 # and a running pod does not pick up ConfigMap changes to env).
@@ -57,16 +56,9 @@ data:
   RKL_CLIP: "${RKL_CLIP}"
   CLIP_RATIO: "${CLIP_RATIO}"
   LOSS_NORM: "${LOSS_NORM}"          # token (default) | sequence (per-rollout weighting)
-  TOPK_KL: "${TOPK_KL}"              # 0 = off | k: also distil the teacher's top-k distribution
-  TOPK_KL_WEIGHT: "${TOPK_KL_WEIGHT}"
-  TOPK_KL_MODE: "${TOPK_KL_MODE}"    # forward | reverse
   ANSWER_SPAN_POLICY: "${ANSWER_SPAN_POLICY}"             # none | mask (zero credit on the final-answer line)
   TRUNCATION_PENALTY: "${TRUNCATION_PENALTY}"             # 0 = off; needs TRUNCATED_POLICY mask|keep
   TRUNCATION_PENALTY_TAIL: "${TRUNCATION_PENALTY_TAIL}"
-  PROMPT_FILTER_FILE: "${PROMPT_FILTER_FILE}"   # empty = all prompts; else teacher-solved only
-  SFT_ANCHOR_FILE: "${SFT_ANCHOR_FILE}"
-  SFT_ANCHOR_WEIGHT: "${SFT_ANCHOR_WEIGHT}"     # 0 = pure on-policy
-  SFT_ANCHOR_BATCH: "${SFT_ANCHOR_BATCH}"
   WHITEN_ADVANTAGES: "${WHITEN_ADVANTAGES}"
   PRECISION: "${PRECISION}"
   LORA_R: "${LORA_R}"

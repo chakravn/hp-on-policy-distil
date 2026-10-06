@@ -58,8 +58,7 @@ def completion_nll_sum(model, ex: dict, device: str) -> tuple[torch.Tensor, int]
     """Summed NLL of the completion tokens (incl. <|im_end|>) and how many there were."""
     ids = torch.tensor([ex["ids"]], dtype=torch.long, device=device)
     # Only the completion positions need logits. With a 248k vocab the LM head over the
-    # ~800-token few-shot prompt is most of the cost, so ask for the last C+1 positions only
-    # (the train_distill anchor ran ~6 s/example with full logits).
+    # ~800-token few-shot prompt is most of the cost, so ask for the last C+1 positions only.
     keep = len(ex["ids"]) - ex["prompt_len"] + 1
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=device.startswith("cuda")):
         try:
@@ -74,9 +73,9 @@ def completion_nll_sum(model, ex: dict, device: str) -> tuple[torch.Tensor, int]
 def main() -> int:
     env = os.environ.get
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--student-model", default=env("STUDENT_MODEL", "Qwen/Qwen3.5-0.8B"))
-    ap.add_argument("--sft-dir", default=env("SFT_DIR", "/fsx/opd/sft1"))
-    ap.add_argument("--epochs", type=int, default=int(env("SFT_EPOCHS", "2")))
+    ap.add_argument("--student-model", default=env("STUDENT_MODEL", "Qwen/Qwen3.5-2B"))
+    ap.add_argument("--sft-dir", default=env("SFT_DIR", "/fsx/opd/sft-gsm8k"))
+    ap.add_argument("--epochs", type=int, default=int(env("SFT_EPOCHS", "1")))
     ap.add_argument("--batch-size", type=int, default=int(env("SFT_BATCH", "32")),
                     help="sequences per optimizer step (accumulated one at a time)")
     ap.add_argument("--lr", type=float, default=float(env("SFT_LR", "1e-4")))

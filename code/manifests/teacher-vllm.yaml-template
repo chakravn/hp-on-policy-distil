@@ -1,5 +1,5 @@
 # Teacher inference pool: a vLLM OpenAI-compatible server that scores student tokens
-# (echo-logprobs) during training and answers MATH-500 in the eval's `teacher` phase.
+# (echo-logprobs) during training and answers the eval's `teacher` phase.
 #
 #   set -a && source manifests/env_vars && set +a
 #   envsubst < manifests/teacher-vllm.yaml-template | kubectl --context "$CTX" apply -f -
@@ -61,7 +61,7 @@
 # that: at this footprint the binding constraint is prefill compute, not memory.
 #
 # The teacher is the accuracy CEILING -- the student moves toward it and cannot pass it. Run
-# EVAL_PHASE=before,teacher first to measure the gap (on GSM8K: 0.8B 52.0% vs this 9B 94.5%).
+# EVAL_PHASE=before,teacher first to measure the gap (on GSM8K: 2B 74.8% vs this 9B 94.3%).
 # manifests/env_vars documents the 27B teacher for a higher ceiling (also TP=2, same partition).
 apiVersion: apps/v1
 kind: Deployment
@@ -108,7 +108,7 @@ spec:
               --gpu-memory-utilization ${TEACHER_GPU_UTIL}
               --max-model-len ${TEACHER_MAX_MODEL_LEN}
               --max-num-seqs ${TEACHER_MAX_NUM_SEQS}
-              --max-logprobs ${TEACHER_MAX_LOGPROBS}
+              --max-logprobs 1
               --return-tokens-as-token-ids
           ports:
             - { containerPort: 8000 }

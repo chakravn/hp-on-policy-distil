@@ -56,8 +56,9 @@ Every checkpoint: [`results/gsm8k_evals.csv`](results/gsm8k_evals.csv).
   lags at step 25 (half as many distinct prompts seen) and ties run17 at step 50 (84.4% vs. 84.0%,
   ~5 problems). It stays stable: capped rollouts fall from 17% to 8% during training.
 
-Next (in progress): `TOPK_KL=20` (run19) — a KL to the teacher's top-20 next-token distribution at
-every completion position, a denser signal than the sampled-token reverse KL.
+Tried and removed from the code: a KL to the teacher's top-20 next-token distribution at every
+completion position (run19, `TOPK_KL=20`) scored 84.2% at step 25 and 83.5% at step 50 -- a tie
+with run17.
 
 ## Reproducing
 

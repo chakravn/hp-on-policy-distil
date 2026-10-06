@@ -1,35 +1,27 @@
 """Rollout buffer for on-policy distillation.
 
 The buffer is the seam between two rates: the *generator* (student sampling + teacher
-scoring) fills it, and the *trainer* drains it. In the notebook the two alternate in one
-process, so a plain deque is enough. In a real HyperPod job you would swap this for a
-distributed queue (Ray / OpenRLHF engine) shared across the generation and training pools
--- the interface below is deliberately the minimum that swap would need to preserve.
+scoring) fills it, and the *trainer* drains it.
 
-Why it matters for distillation:
   * capacity      -- bounds memory; oldest rollouts are evicted (maxlen).
   * staleness     -- a rollout sampled under student weights theta_k but trained at
-                     theta_{k+n} is *off-policy by n steps*. We stamp each rollout with
-                     the step it was produced at so the trainer can bound staleness and
-                     apply an importance-sampling correction (see distill_step).
+                     theta_{k+n} is *off-policy by n steps*. Each rollout is stamped with
+                     the policy step it came from; `max_age` is enforced on every read
+                     (`evict_stale`), and the importance ratio in `distill_step` corrects
+                     what remains.
 
-THE STALENESS BUG THIS VERSION FIXES
-------------------------------------
-The original buffer held 256 rollouts, gained 8 per step and sampled 8 uniformly from the
-whole deque. The expected age of a sampled rollout was therefore ~16 steps, so the loop
-was not on-policy at all despite the name, and `logp_old` had drifted so far from the live
-policy that the PPO ratio clip zeroed the gradient on most tokens. `mean_staleness` was
-logged but never enforced.
-
-Now: `max_age` is enforced on every read (`evict_stale`), and `max_age=0` gives a strictly
-on-policy loop -- generate, train on exactly those rollouts, discard. That is the default.
+`max_age=0` gives a strictly on-policy loop -- generate, train on exactly those rollouts,
+discard. With the vLLM sampler the trainer uses `max_age = SAMPLER_SYNC_EVERY`, the lag
+between an adapter push and the rollouts generated from it. Sampling uniformly from a large,
+unbounded buffer would make the loop off-policy by many steps and let the PPO clip zero most
+of the gradient.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 import random
 
 
@@ -47,9 +39,6 @@ class Rollout:
     # so the trainer drops (or masks) these -- see train_distill.--truncated-policy.
     truncated: bool = False
     prompt_text: str = ""          # kept for debugging / dumping example rollouts
-    # Teacher top-k next-token distribution per completion token (--topk-kl), else None.
-    teacher_topk_ids: Optional[List[List[int]]] = None
-    teacher_topk_logp: Optional[List[List[float]]] = None
 
     def num_completion_tokens(self) -> int:
         return len(self.token_ids) - self.prompt_len

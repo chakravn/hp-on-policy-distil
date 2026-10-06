@@ -21,13 +21,13 @@ Alignment convention (shared by both backends): the returned list has the same l
 undefined (no context) and is returned as 0.0 -- it is always masked out downstream
 because we only score completion tokens (t >= prompt_len).
 
-TWO SILENT-FAILURE MODES THIS FILE NOW GUARDS
----------------------------------------------
+TWO SILENT-FAILURE MODES THIS FILE GUARDS
+-----------------------------------------
 1. **Null logprobs.** vLLM does not populate echoed prompt logprobs under every
-   version/flag combination. The old code mapped `None -> 0.0`, which turns the advantage
-   into ``-kl_coef * log pi_student`` -- a *positive* advantage on the student's own
-   samples, i.e. pure self-reinforcement rather than distillation. `teacher_kl` still
-   printed a falling curve while accuracy went nowhere. We now raise instead.
+   version/flag combination. Mapping `None -> 0.0` would turn the advantage into
+   ``-kl_coef * log pi_student`` -- a *positive* advantage on the student's own samples,
+   i.e. pure self-reinforcement -- while `teacher_kl` still printed a falling curve.
+   `_parse` raises instead.
 2. **Vocabulary mismatch.** `score()` sends raw token ids. If the teacher and student do
    not share a tokenizer, the teacher scores *different tokens* than the student
    generated and the KL is meaningless, with no error anywhere. Call
@@ -112,56 +112,11 @@ class RemoteTeacher:
             )
         return [0.0 if v is None else float(v) for v in raw]
 
-    def score_topk(self, token_ids: Sequence[int], prompt_len: int, k: int):
-        """`score()` plus the teacher's top-`k` next-token distribution at every completion
-        position: returns (logps, top_ids, top_logps), the last two [n_completion][k].
-
-        Element j of top_ids/top_logps is the teacher's distribution over token
-        `prompt_len + j`, so it lines up 1:1 with the completion tokens. Needs the server
-        started with `--max-logprobs >= k` and `--return-tokens-as-token-ids` (keys arrive
-        as "token_id:<id>"; plain token strings cannot be mapped back to ids reliably).
-        """
-        resp = self.client.completions.create(
-            model=self.model,
-            prompt=list(token_ids),
-            max_tokens=1,
-            echo=True,
-            logprobs=k,
-            temperature=0.0,
-            extra_body={"return_tokens_as_token_ids": True},
-        )
-        logps = self._parse(resp, len(token_ids))
-        top = list(resp.choices[0].logprobs.top_logprobs)[:len(token_ids)]
-        top_ids, top_lps = [], []
-        for pos in range(prompt_len, len(token_ids)):
-            # vLLM adds the actual token to the top-k dict when it is not already in it,
-            # so a position can carry k+1 entries: keep the k most likely.
-            items = sorted((top[pos] or {}).items(), key=lambda kv: kv[1], reverse=True)[:k]
-            if not items:
-                raise TeacherScoringError(f"teacher returned no top logprobs at position {pos}")
-            ids = [int(key.rsplit(":", 1)[1]) for key, _ in items]
-            lps = [float(v) for _, v in items]
-            # Pad to k with a zero-probability entry (only if the server returned fewer).
-            ids += [ids[0]] * (k - len(ids))
-            lps += [-1e9] * (k - len(lps))
-            top_ids.append(ids)
-            top_lps.append(lps)
-        return logps, top_ids, top_lps
-
-    def score_batch_topk(self, batch: Sequence[Sequence[int]], prompt_lens: Sequence[int], k: int):
-        """Concurrent `score_topk`; returns a list of (logps, top_ids, top_logps)."""
-        if not batch:
-            return []
-        workers = max(1, min(self.max_concurrency, len(batch)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(lambda a: self.score_topk(a[0], a[1], k), zip(batch, prompt_lens)))
-
     def score_batch(self, batch: Sequence[Sequence[int]]) -> List[List[float]]:
         """Score many sequences concurrently.
 
-        One HTTP round-trip per rollout, issued sequentially, was a dominant cost in the
-        original loop (32 serial requests per training step). vLLM batches internally, so
-        the fix is simply to have several requests in flight.
+        One HTTP round-trip per rollout, issued sequentially, would dominate the step. vLLM
+        batches internally, so it is enough to keep several requests in flight.
         """
         if not batch:
             return []

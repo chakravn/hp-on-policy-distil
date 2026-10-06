@@ -18,18 +18,18 @@ T-1 (index i = log-prob of token i+1), so we compare against `teacher_logp[1:]`.
 Completion tokens y_t live at sequence positions [prompt_len, T-1], i.e. log-prob indices
 [prompt_len-1, T-2].
 
-TWO CONDITIONING FIXES IN THIS VERSION
---------------------------------------
-1. **Outlier clamping.** Per-token reverse KL between a 4B student and a 9B teacher is
-   heavy-tailed: a handful of tokens carry tens of nats. With a global
-   `clip_grad_norm_(1.0)`, those few tokens consumed the entire step budget and the rest of
-   the sequence contributed essentially nothing. `rkl_clip` bounds each token's credit.
-2. **Batch whitening.** Advantages are now centred and scaled across the whole batch
+CONDITIONING
+------------
+1. **Outlier clamping.** Per-token reverse KL between a small student and a 9B teacher is
+   heavy-tailed: a handful of tokens carry tens of nats, and under a global
+   `clip_grad_norm_(1.0)` they would consume the whole step. `rkl_clip` bounds each token's
+   credit.
+2. **Batch whitening.** Advantages are centred and scaled across the whole batch
    (`whiten_advantages`). The batch mean acts as a baseline -- standard practice in policy
-   gradient, and what makes the update well conditioned instead of a uniformly negative
-   push. Note this is a deliberate departure from the raw Tinker objective: it changes the
-   *scale* and adds a baseline, so `kl_coef` becomes a pure temperature on an already
-   normalised signal. Set `whiten=False` to recover the unnormalised recipe.
+   gradient -- so the update is well conditioned instead of a uniformly negative push
+   (the rollouts' reverse KL averages ~+0.3). This departs from the raw Tinker objective:
+   it changes the *scale* and adds a baseline, so `kl_coef` becomes a pure temperature on
+   an already normalised signal. Set `whiten=False` to recover the unnormalised recipe.
 """
 
 from __future__ import annotations
@@ -59,8 +59,7 @@ def sequence_logprobs_batched(
     attention_mask: torch.Tensor,   # [B, T]
     with_grad: bool = True,
     start: int = 0,
-    gather_ids: torch.Tensor | None = None,   # [B, T-1, K] extra token ids per position
-):
+) -> torch.Tensor:
     """Per-token log-probs for a right-padded batch: returns [B, T-1].
 
     Right padding (not left) because we are scoring existing sequences, not generating:
@@ -71,9 +70,6 @@ def sequence_logprobs_batched(
     The [B, T, V] logits over Qwen's ~248k vocab are the trainer's largest allocation, and
     with a few-shot prompt most positions are prompt tokens whose log-probs are never read.
     Pass `min(prompt_len) - 1` to project only the completion span.
-
-    With `gather_ids`, also returns the log-probs of those K tokens at every position
-    ([B, T-1, K], same alignment and zero-fill) -- the student side of the top-k KL.
     """
     T = input_ids.shape[1]
     start = max(0, min(start, T - 1))
@@ -88,12 +84,9 @@ def sequence_logprobs_batched(
         logits = logits[:, -keep:]
         logp = logits[:, :-1].log_softmax(-1)                                      # [B,keep-1,V]
         tok_logp = logp.gather(-1, input_ids[:, start + 1:, None]).squeeze(-1)     # [B,keep-1]
-        extra = logp.gather(-1, gather_ids[:, start:]) if gather_ids is not None else None
         if start:
             tok_logp = torch.cat([tok_logp.new_zeros(tok_logp.shape[0], start), tok_logp], 1)
-            if extra is not None:
-                extra = torch.cat([extra.new_zeros(extra.shape[0], start, extra.shape[2]), extra], 1)
-    return tok_logp if gather_ids is None else (tok_logp, extra)
+    return tok_logp
 
 
 def reverse_kl(student_logp: torch.Tensor, teacher_logp_full: torch.Tensor) -> torch.Tensor:
@@ -122,24 +115,6 @@ def rollout_reverse_kl(
     if rkl_clip and rkl_clip > 0:
         rkl = rkl.clamp(-rkl_clip, rkl_clip)
     return rkl
-
-
-def topk_kl(student_topk_logp: torch.Tensor, teacher_topk_logp: torch.Tensor,
-            mode: str = "forward") -> torch.Tensor:
-    """Per-token KL between teacher and student over the teacher's top-k tokens: [C, K] -> [C].
-
-    The sampled-token reverse KL gives one scalar of credit per token; the teacher's top-k
-    distribution gives the student a full target at every position it visited (on-policy,
-    as in GKD). The teacher's top-k is renormalised (top-20 covers nearly all its mass).
-      forward: sum_v p_T(v) [log p_T(v) - log p_S(v)] with the student's full-vocab
-               log-probs, so mass the student puts outside the teacher's top-k is penalised.
-      reverse: KL(q_S || p_T) with the student also renormalised over the top-k.
-    """
-    t = teacher_topk_logp.log_softmax(-1)
-    if mode == "reverse":
-        q = student_topk_logp.log_softmax(-1)
-        return (q.exp() * (q - t)).sum(-1)
-    return (t.exp() * (t - student_topk_logp)).sum(-1)
 
 
 def whiten_advantages(

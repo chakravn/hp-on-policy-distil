@@ -1,23 +1,20 @@
-"""Teacher solutions for the supervised warm-up -- and the teacher-solvable prompt filter.
+"""Teacher solutions for the optional supervised warm-up (SFT, then on-policy distillation).
 
 WHY A WARM-UP
 -------------
-On-policy distillation only reweights tokens the student already samples. On MATH-500 with
-a 0.8B student that left a gap: reasoning improved on problems the student finished, but it
-stopped concluding -- the \\boxed rate fell from 69% to ~49%. A per-token loss on the sampled
-token can push "keep reasoning" down but never push "\\boxed{...}<|im_end|>" up unless the
-student happens to sample it. Imitating the teacher's own finished solutions teaches that
-directly. This is phase 1 of the SFT -> on-policy recipe in the
-HuggingFaceH4 on-policy-distillation write-up, which also filters to "correct teacher
-completions only".
+On-policy distillation only reweights tokens the student already samples: a per-token loss
+on the sampled token can push a bad continuation down but never push one the student does
+not sample up. Imitating the teacher's own correct, finished solutions first moves the
+student toward them directly; the on-policy run then starts from that adapter
+(INIT_ADAPTER). This is phase 1 of the SFT -> on-policy recipe in the HuggingFaceH4
+on-policy-distillation write-up, which keeps "correct teacher completions only".
 
 WHAT IT WRITES (``$SFT_DIR/teacher_solutions.jsonl``, one row per training problem)
     question, gold, prompt (exact chat-templated text the student is trained/evaluated on),
     completion, finish_reason, completion_tokens, answer, correct
 Rows are appended as they finish and the script resumes from an existing file, so a
 restart does not re-query the teacher. `sft_warmup.py` keeps rows that are correct AND
-finished; the same rows' questions are the teacher-solvable prompt pool for the next
-on-policy run.
+finished.
 
 Prompts are built exactly as `train_distill.py` builds them (same `build_prompt`, few-shot
 count, chat template and thinking switch, student tokenizer), and are sent as token ids to
@@ -83,22 +80,22 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--teacher-url", default=env("TEACHER_URL", "http://teacher-vllm.default.svc.cluster.local:8000/v1"))
     ap.add_argument("--teacher-model", default=env("TEACHER_MODEL_ID", "Qwen/Qwen3.5-9B"))
-    ap.add_argument("--student-model", default=env("STUDENT_MODEL", "Qwen/Qwen3.5-0.8B"),
+    ap.add_argument("--student-model", default=env("STUDENT_MODEL", "Qwen/Qwen3.5-2B"),
                     help="tokenizer the prompts are built with -- the student's, as in training")
-    ap.add_argument("--task", default=env("TASK", "math500"))
-    ap.add_argument("--train-dataset", default=env("TRAIN_DATASET", "EleutherAI/hendrycks_math"))
-    ap.add_argument("--train-dataset-config", default=env("TRAIN_DATASET_CONFIG", ""))
+    ap.add_argument("--task", default=env("TASK", "gsm8k"))
+    ap.add_argument("--train-dataset", default=env("TRAIN_DATASET", "openai/gsm8k"))
+    ap.add_argument("--train-dataset-config", default=env("TRAIN_DATASET_CONFIG", "main"))
     ap.add_argument("--train-split", default=env("TRAIN_SPLIT", "train"))
     ap.add_argument("--fewshot", type=int, default=int(env("TRAIN_FEWSHOT", "4")))
     ap.add_argument("--enable-thinking", type=int, default=int(env("ENABLE_THINKING", "0") or "0"))
     ap.add_argument("--max-new-tokens", type=int, default=int(env("MAX_NEW_TOKENS", "2048")))
     ap.add_argument("--temperature", type=float, default=float(env("SFT_GEN_TEMPERATURE", "0")),
                     help="0 = greedy: the teacher's single best solution, as in its 81.8% eval")
-    ap.add_argument("--limit", type=int, default=int(env("SFT_GEN_LIMIT", "4000")),
+    ap.add_argument("--limit", type=int, default=int(env("SFT_GEN_LIMIT", "0")),
                     help="training problems to solve (0 = all ~7.5k)")
     ap.add_argument("--concurrency", type=int, default=int(env("SFT_GEN_CONCURRENCY", "32")))
     ap.add_argument("--seed", type=int, default=int(env("SEED", "0")))
-    ap.add_argument("--out-dir", default=env("SFT_DIR", "/fsx/opd/sft1"))
+    ap.add_argument("--out-dir", default=env("SFT_DIR", "/fsx/opd/sft-gsm8k"))
     args = ap.parse_args()
 
     from openai import OpenAI

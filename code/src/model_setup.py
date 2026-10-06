@@ -1,39 +1,19 @@
 """Student model / optimizer construction for the distillation trainer.
 
-THE BUG THIS FILE EXISTS TO PREVENT
------------------------------------
-The original trainer did::
+TRAINABLE PARAMETERS MUST BE fp32
+---------------------------------
+bf16 has an 8-bit mantissa (relative resolution ~0.4%). An Adam step is ~lr = 1e-5 absolute
+against weights of ~1e-2, a relative update of ~1e-3 -- below what bf16 can represent, so a
+bf16 parameter rounds the update away while `teacher_kl` can still look healthy.
+`assert_trainable_dtype` fails loudly on any trainable parameter that is not fp32.
 
-    student = AutoModelForCausalLM.from_pretrained(..., torch_dtype=torch.bfloat16)
-    opt = torch.optim.AdamW(student.parameters(), lr=1e-5)
-
-i.e. AdamW writing updates directly into **bfloat16** parameters. bf16 has an 8-bit
-mantissa, so its relative resolution is about 2^-8 ~= 0.4%. An Adam step has magnitude
-~= lr = 1e-5 *absolute*, while a typical Qwen weight is ~1e-2, making the relative update
-~1e-3 -- an order of magnitude below what bf16 can represent. Momentum accumulated
-correctly and then the write-back rounded away to nothing. The model barely moved, while
-`teacher_kl` still drifted down from the few large-gradient tensors that did clear the
-threshold, so the run *looked* healthy.
-
-`assert_trainable_dtype` now fails loudly on any trainable parameter that is not fp32.
-
-WHY LoRA IS THE DEFAULT AT 4B
------------------------------
-The obvious fix -- keep everything in fp32 -- costs, for a 4B student: 16 GB params +
-16 GB grads + 32 GB Adam state = ~68 GB. That does not fit a 24 GB A10G and would need
-FSDP across 4 GPUs, plus `summon_full_params` wiring around `.generate()` that this
-codebase does not have. LoRA on a frozen bf16 base costs ~13 GB and fits one GPU:
-
-    | strategy                        | total (+act.) | fits 1x A10G |
-    | full fp32 AdamW                 | ~68 GB        | no           |
-    | fp32 + 8-bit Adam               | ~44 GB        | no           |
-    | LoRA r=32, bf16 base, fp32 adapter | ~13 GB     | yes          |
-
-LoRA also fixes the precision bug in the right place: the frozen base stays bf16 (it is
-never updated, so rounding cannot hurt it) while the small trainable adapter is fp32,
-where a 1e-5 update resolves cleanly. And a LoRA adapter can be hot-swapped into a vLLM
-sampler (`sampler.VLLMSampler.sync_adapter`), which removes the need for a full-weight
-synchronisation protocol between trainer and sampler.
+WHY LoRA
+--------
+Full fp32 AdamW needs ~16 bytes/param (params + grads + two Adam moments): ~32 GB for a 2B
+student, more than one 24 GB A10G. LoRA on a frozen bf16 base fits one GPU and puts the
+precision where it matters -- the frozen base stays bf16 (it is never updated), the small
+trainable adapter is fp32. A LoRA adapter can also be hot-swapped into the vLLM sampler
+(`sampler.VLLMSampler.sync_adapter`) instead of synchronising full weights.
 """
 
 from __future__ import annotations
@@ -194,9 +174,8 @@ def build_scheduler(optimizer, total_steps: int, warmup_ratio: float = 0.05,
                     min_lr_ratio: float = 0.1):
     """Linear warm-up then cosine decay to `min_lr_ratio` of peak.
 
-    The original run used a constant 1e-5 with no warm-up. With only a few hundred steps
-    that wastes the early steps on a badly-scaled first update; with a few thousand it
-    leaves the model oscillating instead of settling.
+    A constant LR without warm-up spends the first steps on a badly scaled update and never
+    settles at the end of the run.
     """
     warmup = max(1, int(total_steps * warmup_ratio))
 
