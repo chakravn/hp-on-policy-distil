@@ -321,6 +321,16 @@ lifecycle script by restarting the space.
 Open `~/hp-on-policy-distil/on_policy_distillation.ipynb` (or `code/on_policy_distillation.ipynb`,
 depending on your repository layout) and pick the **Python 3 (ipykernel)** kernel.
 
+> **JupyterLab spaces hosted on the HyperPod nodes** (created through the `amazon-sagemaker-spaces`
+> add-on) run as a Kubernetes pod and do not receive the Studio execution role, so `aws` and
+> `kubectl` have no credentials there. Set the space's service account to `opd-workspace`
+> (`kubectl patch workspaces.workspace.jupyter.org <space> --type merge -p
+> '{"spec":{"serviceAccountName":"opd-workspace"}}'`). The stack creates that account, binds it to
+> `<prefix>-hyperpod-space-role` through EKS Pod Identity, and grants the role edit access to the
+> `default` namespace plus read-only access cluster-wide. The spaces add-on only lets a user attach
+> a non-default service account listed in its `workspace.jupyter.org/service-account-user-patterns`
+> annotation; the stack allows any role session in the account (narrow it to one role if needed).
+
 1. **Part 0 — Setup.** Edit the first code cell: `HP_CLUSTER_NAME=<your-hyperpod-cluster-name>` must become
    your cluster name.
 
