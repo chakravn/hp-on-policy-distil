@@ -1,8 +1,9 @@
 # Experiments
 
 Every on-policy distillation run after the recipe first worked: what changed and what it showed.
-Each run is `manifests/env_vars` plus the overrides in `configs/<run>.env`. The shipped `env_vars`
-defaults are **run17** (2B student, LoRA r=128), so `configs/run17.env` is a no-op.
+Each run is `manifests/env_vars` plus the overrides in `configs/<run>.env`. On this branch the shipped
+`env_vars` defaults are **run22**: run17's recipe (2B student, LoRA r=128) on the AWS Deep Learning
+Containers. run13–run20 ran on the `vllm/vllm-openai` image and are the history that led to it.
 
 All evals use the GSM8K test split (1,319 problems), 4-shot, `#### N` answer match, greedy unless
 noted. Runs are compared with a paired sign test against the base student on the same problems, and
@@ -31,11 +32,11 @@ Measured first, before any training (notebook Part 1): they pick the student and
 | run14 | [`configs/run14.env`](configs/run14.env) | 200 steps | same plateau as run13 from step 50 on |
 | run15 | [`configs/run15.env`](configs/run15.env) | LR 2e-5 | same plateau, reached by step 25 |
 | run16 | [`configs/run16.env`](configs/run16.env) | **2B student**, LR 2e-5, 50 steps | a much higher plateau than the 0.8B, reached by step 25 |
-| run17 | [`configs/run17.env`](configs/run17.env) | 2B with **LoRA rank 128** (alpha 256) — **shipped** | slightly above run16, within about one standard error; flat from step 25 to 50 |
+| run17 | [`configs/run17.env`](configs/run17.env) | 2B with **LoRA rank 128** (alpha 256) — the recipe run22 ships | slightly above run16, within about one standard error; flat from step 25 to 50 |
 | run18 | [`configs/run18.env`](configs/run18.env) | run17 sampled at **T=1.0**, **8 samples × 32 prompts** | lags at step 25, ties run17 at step 50 |
 | run19 | [`configs/run19.env`](configs/run19.env) | run17 + **KL to the teacher's top-20 distribution** | a tie with run17; the loss is no longer in the code |
 | run20 | [`configs/run20.env`](configs/run20.env) | run17 with Qwen's **native zero-shot `\boxed{}` prompt** | higher base, same plateau as run17 |
-| run22 | [`configs/run22.env`](configs/run22.env) | run17 on the **AWS DLC images** (`vllm:server-cuda-v2.6`, `pytorch:2.14.0-cu133-amzn2023`) | the same baselines and the same result as run17, greedy and with the 8-vote majority |
+| run22 | [`configs/run22.env`](configs/run22.env) | run17 on the **AWS DLC images** (`vllm:server-cuda-v2.6`, `pytorch:2.14.0-cu133-amzn2023`) — **shipped** | the same baselines and the same result as run17, greedy and with the 8-vote majority |
 
 **Decoding with a majority vote** (`EVAL_VOTES=8`: 8 samples at T=0.7, most common answer scored):
 
