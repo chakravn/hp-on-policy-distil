@@ -13,8 +13,10 @@ RUNS=[  # name, student, eval dir, steps evaluated, lr, total steps, baseline di
     ("run18","Qwen3.5-2B (r=128, T=1.0, 8/prompt)","/fsx/opd/eval-run18",[25,50],"2e-5",50,"/fsx/opd/baseline-gsm8k-2b"),
     ("run19","Qwen3.5-2B (r=128, + top-20 KL)","/fsx/opd/eval-run19",[25,50],"2e-5",50,"/fsx/opd/baseline-gsm8k-2b"),
     ("run20","Qwen3.5-2B (r=128, native zero-shot boxed)","/fsx/opd/eval-run20",[25,50],"2e-5",50,"/fsx/opd/baseline-gsm8k-native-2b"),
+    ("run22","Qwen3.5-2B (r=128), AWS DLC images","/fsx/opd/eval-run22",[25,50],"2e-5",50,"/fsx/opd/baseline-gsm8k-2b-dlc"),
     # run17's step 25 again, after phase decoded with an 8-vote majority (base + teacher greedy)
     ("run17-maj8","Qwen3.5-2B (LoRA r=128), after = maj@8","/fsx/opd/eval-maj8-run17",[25],"2e-5",50,"/fsx/opd/baseline-gsm8k-2b"),
+    ("run22-maj8","Qwen3.5-2B (r=128), AWS DLC images, after = maj@8","/fsx/opd/eval-maj8-run22",[50],"2e-5",50,"/fsx/opd/baseline-gsm8k-2b-dlc"),
 ]
 w=csv.writer(sys.stdout)
 w.writerow(["run","student","lr","total_steps","step","base_accuracy","accuracy","delta_vs_base_pp","fixed","broken",

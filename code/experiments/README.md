@@ -35,6 +35,7 @@ Measured first, before any training (notebook Part 1): they pick the student and
 | run18 | [`configs/run18.env`](configs/run18.env) | run17 sampled at **T=1.0**, **8 samples × 32 prompts** | lags at step 25, ties run17 at step 50 |
 | run19 | [`configs/run19.env`](configs/run19.env) | run17 + **KL to the teacher's top-20 distribution** | a tie with run17; the loss is no longer in the code |
 | run20 | [`configs/run20.env`](configs/run20.env) | run17 with Qwen's **native zero-shot `\boxed{}` prompt** | higher base, same plateau as run17 |
+| run22 | [`configs/run22.env`](configs/run22.env) | run17 on the **AWS DLC images** (`vllm:server-cuda-v2.6`, `pytorch:2.14.0-cu133-amzn2023`) | the same baselines and the same result as run17, greedy and with the 8-vote majority |
 
 **Decoding with a majority vote** (`EVAL_VOTES=8`: 8 samples at T=0.7, most common answer scored):
 
@@ -62,6 +63,8 @@ Accuracy keeps rising with the number of votes and flattens after about six. Two
 - **Exactly on-policy sampling does not raise the ceiling** (run18), and training stays stable.
 - **A denser teacher signal does not either** (run19, top-20 KL).
 - **The prompt moves the base, not the plateau** (run20).
+- **The AWS DLC images reproduce the recipe** (run22): vLLM 0.30.0+amzn2023 and PyTorch 2.14.0 match
+  run17 within noise.
 - **Every 2B variant ends at the same greedy plateau**, within about one standard error: the ceiling
   is the student's capacity with this teacher. What still moves the reported number is decoding —
   the 8-vote majority — and a larger teacher (27B W4A16, documented in `env_vars`) is the remaining
