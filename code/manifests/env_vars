@@ -83,15 +83,24 @@ export TEACHER_GPU_UTIL=0.90
 export TEACHER_MAX_MODEL_LEN=4096             # prompt + MAX_NEW_TOKENS must fit; also the sampler's limit
 export TEACHER_MAX_NUM_SEQS=48                # per replica
 
-# --- Images ---
-# One build for all three (preflight's quantisation checks probe TRAIN_IMAGE as the teacher's
-# image), pinned by digest to vLLM 0.30.0 -- the build the shipped results were measured on. A
-# moving tag pulls a second ~8 GiB image next to the running one, and the node's 100 GiB disk
-# does not hold two: before switching a running teacher/sampler to another build, delete finished
-# Jobs so ~30 GiB is free (`kubectl get --raw /api/v1/nodes/<node>/proxy/stats/summary`).
-export VLLM_IMAGE=docker.io/vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
-export TRAIN_IMAGE=${VLLM_IMAGE}              # torch + transformers + vllm; peft is pip-installed
-export EVAL_IMAGE=${VLLM_IMAGE}               # inspect-ai is pip-installed
+# --- Images: AWS Deep Learning Containers (ECR Public), versioned tags ---
+# vllm:server-cuda-v2.6  -- vLLM 0.30.0, CUDA 13.0: the teacher, the student sampler and the eval.
+# pytorch:2.14.0-cu133-amzn2023 -- PyTorch 2.14.0, Python 3.12: the trainer. It ships no
+#   transformers/peft/datasets; the distill Job pip-installs them, with transformers pinned to the
+#   vLLM image's version so trainer and teacher run the same Qwen3.5 model code. Its CUDA 13.3
+#   runtime is newer than the node driver (CUDA 13.2), so the Job runs through the image's
+#   ENTRYPOINT, which enables CUDA forward compatibility (/usr/local/cuda/compat).
+# Preflight's quantisation check [2] imports vllm, which the trainer image lacks: it then only
+# warns, and only for a quantised teacher (the shipped bf16 teacher skips it).
+# Each image is ~9 GB compressed (~16-20 GiB on disk) and the node's root disk is 100 GiB: before
+# switching a running teacher/sampler to another build, delete finished Jobs so ~30 GiB is free
+# (`kubectl get --raw /api/v1/nodes/<node>/proxy/stats/summary`).
+# Versioned tags (not the floating server-cuda / 2.14-cu133-amzn2023): an upstream rebuild of a
+# floating tag would pull a second ~9 GB image. As measured, these were sha256:207fd808... and
+# sha256:3a6e5c60...
+export VLLM_IMAGE=public.ecr.aws/deep-learning-containers/vllm:server-cuda-v2.6
+export TRAIN_IMAGE=public.ecr.aws/deep-learning-containers/pytorch:2.14.0-cu133-amzn2023
+export EVAL_IMAGE=${VLLM_IMAGE}               # an HTTP client of vLLM; inspect-ai is pip-installed
 
 # --- Services (in-cluster DNS) ---
 export TEACHER_URL=http://teacher-vllm.$NAMESPACE.svc.cluster.local:8000/v1
