@@ -1,4 +1,4 @@
-"""Regenerate results/gsm8k_evals.csv from the eval dirs on /fsx (run inside a pod that mounts it).
+"""Print every run's per-checkpoint table (CSV) from the eval dirs on /fsx (run inside a pod that mounts it).
 
 Each run is compared with its own student's baseline (base accuracy, paired z, gap closed).
 """
