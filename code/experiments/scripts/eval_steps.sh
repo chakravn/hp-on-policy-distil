@@ -3,7 +3,8 @@
 # Run from anywhere (it cds to code/ and sources manifests/env_vars + env_vars.local). Every cluster call has a
 # hard timeout, and the script waits rather than acting on a failed read. Optional: CRED_REFRESH_CMD
 # (e.g. an `ada credentials update ...` line) is run every 10 minutes to keep credentials fresh.
-# BASE_DIR picks the baseline the eval dirs are seeded from and compared against.
+# BASE_DIR picks the baseline the eval dirs are seeded from and compared against. VOTES (default 1:
+# greedy, the like-for-like sweep) overrides EVAL_VOTES for these evals; 8 = majority-vote the after phase.
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 cd "$SCRIPT_DIR/../.." || exit 1
 RD=$1; PFX=$2; shift 2
@@ -28,8 +29,9 @@ for s in "$@"; do
     until envsubst < manifests/student-eval-job.yaml-template | sed -e "s|name: opd-student-eval|name: $J|" -e "s|app: opd-student-eval|app: $J|" -e "s|^          env:|          env:\\
             - { name: EVAL_FT_MODEL_DIR, value: \"$AD\" }\\
             - { name: EVAL_PHASE,        value: \"after\" }\\
-            - { name: EVAL_DIR,          value: \"$DIR\" }|" | T 120 kubectl --context $C apply -f - >/dev/null 2>&1; do refresh; sleep 30; done
-    until S=$(K get job "$J" -o jsonpath='{.status.succeeded}{.status.failed}' 2>/dev/null) && [ -n "$S" ]; do refresh; sleep 60; done
+            - { name: EVAL_DIR,          value: \"$DIR\" }\\
+            - { name: EVAL_VOTES,        value: \"${VOTES:-1}\" }|" | T 120 kubectl --context $C apply -f - >/dev/null 2>&1; do refresh; sleep 30; done
+    until K get job "$J" -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>/dev/null | grep -qE 'Complete|Failed'; do refresh; sleep 60; done
   fi
   ARGS="$ARGS $PFX-s$s=$DIR/samples_after.jsonl"
   sp=$(SP); K cp $SUMMARIZE "$sp":/tmp/summarize.py -c vllm >/dev/null 2>&1

@@ -36,8 +36,8 @@ the error, and every 4-bit 9B checkpoint on the Hub is a third-party build. bf16
 exact log-probs, at the cost of a second GPU and an all-reduce. And the alternatives on this
 hardware are closed:
 
-- In-flight 4-bit is gone. This pipeline used to serve a bf16 repo and let vLLM quantise it to NF4
-  during the load (`--quantization bitsandbytes`); vLLM has deleted bitsandbytes from its
+- In-flight 4-bit is gone. Letting vLLM quantise a bf16 repo to NF4 during the load
+  (`--quantization bitsandbytes`) no longer works: vLLM has deleted bitsandbytes from its
   quantization registry, and going back to a build that has it means going back before
   `Qwen3_5ForConditionalGeneration` existed — no image has both.
 - FP8/W8A8 is *refused*, not downgraded. A10G is sm_86 and `CompressedTensorsW8A8Fp8` declares
@@ -46,8 +46,8 @@ hardware are closed:
   accepts — kept as the fallback in `env_vars` if you need the spare GPU back.
 
 The teacher is also the accuracy **ceiling**: the notebook's Part 1 baseline measures it and each
-candidate student before committing to the ~4.5 h run (GSM8K: 9B 94.3%, 2B 74.8%, 0.8B 52.0% — the
-2B is distilled).
+candidate student before committing to the ~4.5 h run, and its comparison dashboard picks the
+student to distil.
 
 **Cache arithmetic is hybrid-aware.** Qwen3.5 alternates 3 `linear_attention` layers to 1
 `full_attention`, so of 32 layers only 8 hold a growing KV cache (32 KiB/token) while 24 hold a

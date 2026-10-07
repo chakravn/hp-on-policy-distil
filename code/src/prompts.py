@@ -1,22 +1,14 @@
 """Single source of truth for prompt format and answer extraction.
 
-WHY THIS FILE EXISTS
---------------------
-The first version of this project built its training prompt in `train_distill.py`
-(``apply_chat_template`` on a *base* tokenizer, which silently fell back to a bare
-``question + "\\n"``) and its eval prompt in `eval_student.py` (a preamble + 4 worked
-examples + ``"Question: ...\\nAnswer:"``). The student was therefore optimised in a
-format it was never evaluated in, and never learned the ``#### <number>`` marker the
-scorer looks for. That single mismatch swallowed most of the measured gain.
-
-Both the trainer and the eval now import `build_prompt` / `extract_answer` from here, so
-the two *cannot* drift again. If you change a prompt, you change it once.
+Both the trainer and the eval import `build_prompt` / `extract_answer` from here, so the
+student is trained in exactly the format it is evaluated in (including the ``#### <number>``
+marker the scorer looks for). If you change a prompt, you change it once.
 
 TASK SPECS
 ----------
 `TASK_SPECS` carries one entry per benchmark. Choose the one with real headroom for the
-student: `gsm8k` for a 0.8B (base 52% vs teacher 94.5%), `math500` for a 4B, which already
-saturates GSM8K. `gsm8k_native` is GSM8K in Qwen's zero-shot \\boxed{} format.
+student: `gsm8k` for a 0.8B or 2B, `math500` for a 4B (GSM8K leaves it little to gain).
+`gsm8k_native` is GSM8K in Qwen's zero-shot \boxed{} format.
 
 THINKING MODE
 -------------
@@ -209,8 +201,8 @@ class TaskSpec:
     # the header entirely -- what a zero-shot "native" prompt wants (see gsm8k_native).
     q_label: str = "Question"
     a_label: str = "Answer"
-    # Appended AFTER the question. The Qwen model card puts the format instruction here
-    # rather than in a preamble, and the 0.8B scores ~9pp higher that way (see gsm8k_native).
+    # Appended AFTER the question: the Qwen model card puts the format instruction here rather
+    # than in a preamble (see gsm8k_native).
     suffix: str = ""
 
 

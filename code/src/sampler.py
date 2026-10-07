@@ -1,19 +1,12 @@
-"""Batched student rollout generation -- the throughput fix.
-
-The original loop called `student.generate()` once per rollout, then did a *second* full
-forward pass to recover `logp_old`. At 4B on one A10G that is ~25 tok/s, so a step of 32
-rollouts x 512 tokens took ~11 minutes and a 3000-step run would have taken ~550 hours.
-Generation, not training, was the binding constraint.
+"""Batched student rollout generation.
 
 Two backends, same interface:
 
   * HFSampler   -- batched `generate()` with left padding, taking `logp_old` straight out
-                   of `output_scores` so the second forward pass is gone. ~5-10x the old
-                   throughput; no extra infra. Good for a demo-scale run.
-  * VLLMSampler -- the student served by its own vLLM process with `--enable-lora`, on a
-                   second GPU. The trainer pushes the LoRA adapter across every N steps
-                   (`sync_adapter`) instead of synchronising full weights. ~20-40x the old
-                   throughput; this is what makes a multi-thousand-step run affordable.
+                   of `output_scores` (no second forward pass). No extra infra; slow.
+  * VLLMSampler -- the student served by its own vLLM process with `--enable-lora`, on its
+                   own GPU. The trainer pushes the LoRA adapter every N steps
+                   (`sync_adapter`) instead of synchronising full weights; ~5-10x faster.
 
 WHY logp_old MUST BE THE *RAW* POLICY LOG-PROB
 ----------------------------------------------
@@ -21,14 +14,13 @@ The importance ratio is ``exp(logp_new - logp_old)``, and `logp_new` is computed
 logits. So `logp_old` has to be the raw model distribution too. HuggingFace's
 `output_scores` are the logits *after* the sampling warpers (temperature, top-p, top-k,
 min-p, repetition penalty), and Qwen ships a `generation_config.json` that sets several of
-them. If we took those scores at face value under, say, `temperature=0.7, top_k=20`, the
-ratio would be comparing two different distributions and the clip/gradient would be
-quietly wrong.
+them. Taken at face value under, say, `temperature=0.7, top_k=20`, the ratio would compare
+two different distributions and the clip/gradient would be quietly wrong.
 
 `_neutral_generation_kwargs` therefore pins every warper off and `HFSampler` asserts it.
 When sampling with a temperature other than 1.0 (`--temperature`), that free path is not
-available and the sampler falls back to one extra forward pass to recover raw log-probs --
-correctness over speed, explicitly rather than by accident.
+available and the sampler falls back to one extra forward pass to recover raw log-probs.
+vLLM returns raw log-probs at any temperature.
 
 Only the *completion* span of `logp_old` is ever read (see `distill_step.completion_slice`),
 so prompt positions are filled with 0.0 and no prompt-token log-probs are needed.
@@ -281,6 +273,22 @@ class VLLMSampler:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(self._generate_one, prompts))
 
+    def served_models(self) -> List[str]:
+        """Model ids the sampler serves: its base model plus any loaded adapters."""
+        return [m.id for m in self.client.models.list().data]
+
+    def assert_serves_base(self) -> None:
+        """The sampler must serve the trainer's student. Otherwise the first adapter push fails
+        inside vLLM with a bare tensor-size mismatch (e.g. a 2B adapter on a 0.8B sampler) --
+        the usual cause is a sampler left on another model by the baseline loop."""
+        served = self.served_models()
+        if self.base_model not in served:
+            raise RuntimeError(
+                f"the student sampler at {self.base_url} serves {served}, but the trainer's "
+                f"student is {self.base_model!r}. Re-apply manifests/student-sampler.yaml-template "
+                f"from the same env_vars as the trainer (STUDENT_MODEL, LORA_R), wait for it, "
+                f"then restart the trainer.")
+
     def sync_adapter(self, path: str) -> None:
         """Load the freshly-saved LoRA adapter into the running server.
 
@@ -290,6 +298,8 @@ class VLLMSampler:
         import urllib.error
         import urllib.request
 
+        if self._adapter_version == 0:
+            self.assert_serves_base()
         version = self._adapter_version + 1
         name = f"{self.ADAPTER_NAME}-{self._run_tag}-{version}"
         path = export_adapter_for_vllm(path, self.base_model)
@@ -302,9 +312,9 @@ class VLLMSampler:
             urllib.request.urlopen(req, timeout=300).read()
         except urllib.error.HTTPError as exc:
             raise RuntimeError(
-                f"vLLM refused the adapter push ({exc.code}): {exc.read()[:500]!r}. "
-                "Start the student sampler with --enable-lora and "
-                "VLLM_ALLOW_RUNTIME_LORA_UPDATING=1."
+                f"vLLM refused the adapter push ({exc.code}): {exc.read()[:500]!r}. The sampler "
+                f"must run --enable-lora with VLLM_ALLOW_RUNTIME_LORA_UPDATING=1, serve "
+                f"{self.base_model!r}, and allow --max-lora-rank >= the adapter's rank."
             ) from exc
         self._adapter_version = version
         self._adapter_loaded = True

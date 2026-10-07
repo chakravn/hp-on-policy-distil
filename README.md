@@ -3,10 +3,10 @@
 ![Workflow: code to eval dashboard](slides/workflow.png)
 
 Distils **Qwen3.5-9B** into **Qwen3.5-2B** (LoRA rank 128) on GSM8K with on-policy distillation and
-no supervised warm-up: the student goes from **74.8% to 84.0%** after 25 steps (all 1,319 test
-problems, greedy), closing 47% of the gap to the teacher's 94.3%. The workflow starts with a
-**baseline eval** of the teacher and each candidate student (9B 94.3%, 2B 74.8%, 0.8B 52.0%) and picks
-the student from a comparison dashboard: the 0.8B has a wider gap but plateaus at ~65%. Experiment history:
+no supervised warm-up, evaluated on all 1,319 GSM8K test problems: the base student and the teacher
+greedy, the distilled student greedy and with an 8-vote majority. The workflow starts with a
+**baseline eval** of the teacher and each candidate student and picks the student from a comparison
+dashboard. Measured results and experiment history:
 [`code/experiments/`](code/experiments/). A more detailed version of the diagram is in
 [`slides/workflow-detailed.png`](slides/workflow-detailed.png).
 
@@ -320,6 +320,16 @@ lifecycle script by restarting the space.
 
 Open `~/hp-on-policy-distil/on_policy_distillation.ipynb` (or `code/on_policy_distillation.ipynb`,
 depending on your repository layout) and pick the **Python 3 (ipykernel)** kernel.
+
+> **JupyterLab spaces hosted on the HyperPod nodes** (created through the `amazon-sagemaker-spaces`
+> add-on) run as a Kubernetes pod and do not receive the Studio execution role, so `aws` and
+> `kubectl` have no credentials there. Set the space's service account to `opd-workspace`
+> (`kubectl patch workspaces.workspace.jupyter.org <space> --type merge -p
+> '{"spec":{"serviceAccountName":"opd-workspace"}}'`). The stack creates that account, binds it to
+> `<prefix>-hyperpod-space-role` through EKS Pod Identity, and grants the role edit access to the
+> `default` namespace plus read-only access cluster-wide. The spaces add-on only lets a user attach
+> a non-default service account listed in its `workspace.jupyter.org/service-account-user-patterns`
+> annotation; the stack allows any role session in the account (narrow it to one role if needed).
 
 1. **Part 0 — Setup.** Edit the first code cell: `HP_CLUSTER_NAME=<your-hyperpod-cluster-name>` must become
    your cluster name.

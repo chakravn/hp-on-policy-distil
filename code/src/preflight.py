@@ -19,8 +19,8 @@ Checks:
      means it scores different text than the student generated. Silent and fatal.
   4. GPU topology -- A10G has no NVLink, so TP all-reduce crosses PCIe; `SYS` links are
      far worse than `PHB`/`PXB` and worth knowing about before blaming the trainer.
-  5. teacher echo-logprobs actually populated -- the single failure that turns the
-     advantage into self-reinforcement and produced the original ~6% result.
+  5. teacher echo-logprobs actually populated -- missing ones would turn the advantage into
+     self-reinforcement while `teacher_kl` still falls.
   6. student training memory fit for the chosen precision.
   7. train/eval prompt-format agreement.
   8. the single-node GPU partition -- teacher TP x REPLICAS + trainer + sampler must fit
@@ -28,6 +28,8 @@ Checks:
      that decides whether anything runs at all, and getting it wrong shows up as a pod stuck
      Pending forever rather than as an error. As shipped (TP=2 x 1) the partition is
      2 + 1 + 1 = 4 of 4, exactly full.
+  9. the student sampler serves STUDENT_MODEL -- a sampler left on another model (e.g. by
+     the baseline loop) rejects the trainer's adapter with a bare tensor-size mismatch.
 """
 
 from __future__ import annotations
@@ -218,10 +220,9 @@ def check_quantization_available(rep: Report, quant: str) -> None:
     """Verify the serving vLLM build actually offers this quantisation method.
 
     The trainer pod runs the same image as the teacher (TRAIN_IMAGE == VLLM_IMAGE), so
-    importing vllm here probes the *real* registry rather than a hardcoded list. This check
-    exists because `--quantization bitsandbytes` was the shipped default until vLLM deleted
-    it: the Deployment then failed at startup with a pydantic ValueError, which looks nothing
-    like a configuration problem in this repo's own files.
+    importing vllm here probes the *real* registry rather than a hardcoded list. A removed
+    method (vLLM deleted bitsandbytes) otherwise fails at teacher startup with a pydantic
+    ValueError, which looks nothing like a configuration problem.
     """
     if not quant:
         rep.ok("no quantisation requested (teacher served at --dtype)")
@@ -368,16 +369,15 @@ def _cache_shape(facts: dict, tp: int) -> tuple[float, float, str]:
     """Per-rank cache cost of one token (KiB) and of one sequence's fixed state (MiB).
 
     Qwen3.5 is a HYBRID: `layer_types` alternates 3 linear-attention layers to 1 full-attention
-    layer (full_attention_interval=4). That changes both terms of the arithmetic, and earlier
-    revisions of this repo got both wrong by assuming a uniform transformer:
+    layer (full_attention_interval=4). That changes both terms of the arithmetic compared with
+    a uniform transformer:
 
       * only the full-attention layers keep a growing KV cache. For Qwen3.5-27B that is 16 of
-        64 layers, so 64 KiB/token, not the 256 KiB/token a per-layer count gives -- the old
-        docs were 4x pessimistic.
+        64 layers, so 64 KiB/token, not the 256 KiB/token a per-layer count gives.
       * each linear-attention layer instead holds a fixed recurrent (gated delta-net) state per
         SEQUENCE, sized num_value_heads x value_head_dim x key_head_dim in fp32
-        (mamba_ssm_dtype). That is 48 MiB/seq for the 9B and 144 MiB/seq for the 27B, and it was
-        missing from the accounting entirely even though at 24+ sequences it dominates.
+        (mamba_ssm_dtype). That is 48 MiB/seq for the 9B and 144 MiB/seq for the 27B, and at
+        24+ sequences it dominates.
 
     Both terms are divided by TP: vLLM shards KV heads and linear-attention heads across ranks,
     so a rank stores only its slice. Comparing an unsharded cost against per-rank free memory
@@ -478,7 +478,7 @@ def check_gpu_topology(rep: Report, tp: int, need: int = 1) -> None:
 
 
 def check_teacher_logprobs(rep: Report, url: str, model: str, student_model: str) -> None:
-    """The check that would have caught the original ~6% result."""
+    """Echoed prompt log-probs must be real numbers: nulls would invert the advantage."""
     print("\n[5] teacher echo-logprobs are actually populated", flush=True)
     try:
         from transformers import AutoTokenizer
@@ -549,8 +549,7 @@ def check_format_agreement(rep: Report, task: str, fewshot_train: int, fewshot_e
     print("\n[7] train/eval prompt-format agreement", flush=True)
     if fewshot_train != fewshot_eval:
         rep.fail(f"TRAIN_FEWSHOT={fewshot_train} != EVAL_FEWSHOT={fewshot_eval}. The "
-                 f"student would be optimised in a format it is not evaluated in -- the "
-                 f"single biggest cause of the original flat result.")
+                 f"student would be optimised in a format it is not evaluated in.")
     else:
         rep.ok(f"fewshot matches ({fewshot_train})")
     norm = {"auto": "auto", "raw": "raw", "none": "raw"}
@@ -570,6 +569,27 @@ def check_format_agreement(rep: Report, task: str, fewshot_train: int, fewshot_e
                  "that the teacher is conditioned the same way -- otherwise the two token "
                  "streams diverge structurally and the per-token KL is meaningless.")
     print(f"        task={task}", flush=True)
+
+
+def check_sampler_model(rep: Report, url: str, student_model: str) -> None:
+    """The rollout sampler must serve the trainer's student, or the first adapter push fails."""
+    print("\n[9] the student sampler serves the trainer's student", flush=True)
+    if not url:
+        rep.ok("no sampler (in-process sampling)")
+        return
+    try:
+        import urllib.request
+        served = [m["id"] for m in json.load(urllib.request.urlopen(f"{url.rstrip('/')}/models",
+                                                                    timeout=30))["data"]]
+    except Exception as exc:  # noqa: BLE001
+        rep.fail(f"cannot list the sampler's models at {url}: {type(exc).__name__}: {exc}")
+        return
+    if student_model in served:
+        rep.ok(f"{student_model!r} is served at {url}")
+    else:
+        rep.fail(f"the sampler serves {served}, not STUDENT_MODEL={student_model!r}: the "
+                 f"trainer's adapter would not fit it. Re-apply "
+                 f"manifests/student-sampler.yaml-template from the same env_vars and wait for it.")
 
 
 def check_node_partition(rep: Report, node_gpus: int, teacher_tp: int, trainer_gpus: int,
@@ -606,11 +626,11 @@ def check_node_partition(rep: Report, node_gpus: int, teacher_tp: int, trainer_g
                  f"one), or drop the sampler (STUDENT_SAMPLER_URL= and SAMPLER_GPUS=0).")
     elif claimed == node_gpus:
         rep.ok(f"{claimed}/{node_gpus} GPUs claimed -- exactly full")
-        # The eval needs a GPU too, and it arrives while the sampler Deployment is still up.
-        rep.warn("the node is fully claimed, so the eval Job can only schedule after "
-                 "the trainer pod has COMPLETED and freed its GPU. An eval stuck in "
-                 "Pending is this, not a manifest bug -- or delete the sampler Deployment "
-                 "before running the eval.")
+        # The served eval (EVAL_STUDENT_URL, EVAL_GPUS=0) is an HTTP client and needs no GPU;
+        # the local HF eval does, and cannot schedule until the trainer has freed its GPU.
+        if int(os.environ.get("EVAL_GPUS", "0") or 0) > 0:
+            rep.warn("the node is fully claimed and EVAL_GPUS > 0, so the eval Job can only "
+                     "schedule after the trainer pod has COMPLETED and freed its GPU.")
     else:
         rep.ok(f"{claimed}/{node_gpus} GPUs claimed, {node_gpus - claimed} free")
 
@@ -622,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--teacher-model", default=env("TEACHER_MODEL_ID", "Qwen/Qwen3.5-9B"))
-    ap.add_argument("--student-model", default=env("STUDENT_MODEL", "Qwen/Qwen3.5-0.8B"))
+    ap.add_argument("--student-model", default=env("STUDENT_MODEL", "Qwen/Qwen3.5-2B"))
     ap.add_argument("--teacher-url", default=env("TEACHER_URL", "http://teacher-vllm.default.svc.cluster.local:8000/v1"))
     ap.add_argument("--tp", type=int, default=int(env("TEACHER_TP", "1")))
     ap.add_argument("--teacher-replicas", type=int, default=int(env("TEACHER_REPLICAS", "1")),
@@ -683,6 +703,8 @@ def main(argv: list[str] | None = None) -> int:
                            args.max_new_tokens, args.eval_max_tokens, args.enable_thinking)
     check_node_partition(rep, args.node_gpus, args.tp, args.trainer_gpus,
                          args.sampler_gpus, args.sampler_url, args.teacher_replicas)
+    if not args.skip_teacher:
+        check_sampler_model(rep, args.sampler_url, args.student_model)
 
     print(f"\n=== {len(rep.passed)} passed, {len(rep.warnings)} warnings, "
           f"{len(rep.failures)} failures ===", flush=True)

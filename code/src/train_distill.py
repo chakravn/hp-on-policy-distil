@@ -1,38 +1,31 @@
-"""On-policy distillation trainer -- 9B teacher (vLLM, TP=2, 1 replica, bf16) -> 0.8B LoRA student.
+"""On-policy distillation trainer -- 9B teacher (vLLM, TP=2, bf16) -> 2B LoRA student.
 
-    generate rollouts (batched student sampler)  ->  score every token (remote teacher)
+    generate rollouts (vLLM student sampler)  ->  score every token (remote teacher)
         ->  per-token reverse KL  ->  whitened advantage  ->  importance-sampling update
         ->  push adapter to the sampler  ->  log / checkpoint
 
-Launch (the student Job's command; see manifests/student-distill-job.yaml-template)::
+Every flag defaults from an environment variable (manifests/env_vars, via the opd-config
+ConfigMap), so the Job passes no arguments. By hand::
 
     python3 train_distill.py \
         --teacher-url http://teacher-vllm.default.svc.cluster.local:8000/v1 \
         --teacher-model Qwen/Qwen3.5-9B \
-        --student-model Qwen/Qwen3.5-0.8B \
+        --student-model Qwen/Qwen3.5-2B \
         --sampler-url http://student-sampler.default.svc.cluster.local:8000/v1 \
-        --task gsm8k --steps 100 --output-dir /fsx/opd/gsm8k-opd
+        --task gsm8k --steps 50 --output-dir /fsx/opd/gsm8k-opd
 
-WHAT CHANGED FROM THE FIRST VERSION, AND WHY
---------------------------------------------
-Five defects, not tuning issues, capped the first run's gain at ~6%:
-
-1. *bf16 optimizer.* AdamW wrote 1e-5 updates into bf16 weights, below bf16's resolution,
-   so most updates rounded to nothing. -> `model_setup` (fp32 LoRA adapter on a frozen
-   bf16 base) plus a hard `assert_trainable_dtype` guard.
-2. *200 optimizer steps over 32 cycled prompts.* -> `data.PromptStream` over the full
-   train split, and step counts in the thousands.
-3. *Training prompt format != eval prompt format*, so the student never learned the answer
-   marker the scorer reads. -> both import `prompts.build_prompt`.
-4. *Teacher log-probs could silently be 0.0*, inverting the advantage into pure
-   self-reinforcement. -> `teacher_client` raises, and `--sanity-check` aborts the run if
-   step 0's reverse KL is not positive.
-5. *The "on-policy" buffer was ~97% stale*, so the PPO clip zeroed most of the gradient.
-   -> `RolloutBuffer.max_age` is enforced, defaulting to a strictly on-policy read.
-
-Plus: advantages are whitened and outlier-clamped, truncated rollouts are dropped instead
-of teaching the student never to finish, generation is batched, and the second forward pass
-per rollout is gone.
+GUARDS
+------
+* trainable parameters are fp32 (`model_setup.assert_trainable_dtype`): bf16 would round
+  1e-5 updates away;
+* prompts come from the full train split, never cycled (`data.PromptStream`);
+* train and eval share one prompt format (`prompts.build_prompt`);
+* null teacher log-probs raise (`teacher_client`), and step 0 aborts with exit 3 unless the
+  reverse KL is positive;
+* rollout staleness is bounded (`RolloutBuffer.max_age`), the importance ratio corrects the
+  rest;
+* advantages are clamped (`--rkl-clip`) and whitened, the final-answer line is masked
+  (`--answer-span-policy`), and capped rollouts get no credit on their cut-off token.
 """
 
 from __future__ import annotations
@@ -40,7 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
 import statistics
 import sys
 import time
@@ -54,7 +46,6 @@ from distill_step import (
     distill_loss,
     rollout_reverse_kl,
     sequence_logprobs_batched,
-    topk_kl,
     whiten_advantages,
 )
 from model_setup import (
@@ -83,7 +74,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # -- models / services -------------------------------------------------------------
     ap.add_argument("--teacher-url", default=env("TEACHER_URL", "http://teacher-vllm.default.svc.cluster.local:8000/v1"))
     ap.add_argument("--teacher-model", default=env("TEACHER_MODEL_ID", "Qwen/Qwen3.5-9B"))
-    ap.add_argument("--student-model", default=env("STUDENT_MODEL", "Qwen/Qwen3.5-0.8B"))
+    ap.add_argument("--student-model", default=env("STUDENT_MODEL", "Qwen/Qwen3.5-2B"))
     ap.add_argument("--sampler", choices=["auto", "hf", "vllm"], default=env("STUDENT_SAMPLER", "auto"),
                     help="auto = vLLM when --sampler-url is set, else batched HF generate")
     ap.add_argument("--sampler-url", default=env("STUDENT_SAMPLER_URL", "") or None)
@@ -156,29 +147,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "units) ramped over their last --truncation-penalty-tail tokens. Needs "
                          "--truncated-policy mask|keep (drop removes capped rollouts). 0 = off")
     ap.add_argument("--truncation-penalty-tail", type=int, default=int(env("TRUNCATION_PENALTY_TAIL", "512")))
-    ap.add_argument("--prompt-filter-file", default=env("PROMPT_FILTER_FILE", "") or None,
-                    help="teacher_solutions.jsonl from gen_teacher_data.py: train only on "
-                         "questions the teacher solved (correct + finished). Empty = no filter")
-    ap.add_argument("--sft-anchor-file", default=env("SFT_ANCHOR_FILE", "") or None,
-                    help="teacher_solutions.jsonl whose correct + finished rows feed the "
-                         "supervised anchor term (see --sft-anchor-weight)")
-    ap.add_argument("--sft-anchor-weight", type=float, default=float(env("SFT_ANCHOR_WEIGHT", "0")),
-                    help="add weight x (token-mean NLL of teacher solutions) to every step's "
-                         "loss -- GKD's supervised term. 0 = off (pure on-policy)")
-    ap.add_argument("--sft-anchor-batch", type=int, default=int(env("SFT_ANCHOR_BATCH", "8")),
-                    help="teacher solutions per step for the anchor term")
     ap.add_argument("--loss-norm", choices=["token", "sequence"], default=env("LOSS_NORM", "token"),
                     help="token: every completion token in the batch weighs the same (long "
-                         "rollouts dominate). sequence: every rollout weighs the same -- the "
-                         "first version's weighting; see optimize_batch")
-    ap.add_argument("--topk-kl", type=int, default=int(env("TOPK_KL", "0")),
-                    help="also distil the teacher's top-k next-token distribution at every "
-                         "completion position (needs the teacher's --max-logprobs >= k). "
-                         "0 = off: the sampled-token reverse KL only, as in the blog")
-    ap.add_argument("--topk-kl-weight", type=float, default=float(env("TOPK_KL_WEIGHT", "1.0")),
-                    help="weight of the top-k KL term next to the policy-gradient term")
-    ap.add_argument("--topk-kl-mode", choices=["forward", "reverse"],
-                    default=env("TOPK_KL_MODE", "forward"), help="see distill_step.topk_kl")
+                         "rollouts dominate). sequence: every rollout weighs the same; "
+                         "see optimize_batch")
     ap.add_argument("--no-whiten", dest="whiten", action="store_false",
                     default=env("WHITEN_ADVANTAGES", "1") == "1",
                     help="use the raw unnormalised -kl_coef*rkl advantage instead")
@@ -239,13 +211,10 @@ def _uses_vllm(args: argparse.Namespace) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def build_rollouts(samples, teacher_logps, policy_step: int, truncated_policy: str,
-                   teacher_topk=None) -> list[Rollout]:
-    """Pair sampler output with teacher scores, applying the truncation policy.
-    `teacher_topk` is an optional per-sample (top_ids, top_logps) list for --topk-kl."""
+def build_rollouts(samples, teacher_logps, policy_step: int, truncated_policy: str) -> list[Rollout]:
+    """Pair sampler output with teacher scores, applying the truncation policy."""
     rollouts: list[Rollout] = []
-    teacher_topk = teacher_topk or [(None, None)] * len(samples)
-    for sample, teacher_logp, (top_ids, top_lps) in zip(samples, teacher_logps, teacher_topk):
+    for sample, teacher_logp in zip(samples, teacher_logps):
         if sample.truncated and truncated_policy == "drop":
             continue
         rollouts.append(
@@ -257,8 +226,6 @@ def build_rollouts(samples, teacher_logps, policy_step: int, truncated_policy: s
                 produced_at_step=policy_step,
                 truncated=sample.truncated,
                 prompt_text=sample.prompt_text,
-                teacher_topk_ids=top_ids,
-                teacher_topk_logp=top_lps,
             )
         )
     return rollouts
@@ -320,11 +287,10 @@ def compute_advantages(batch: list[Rollout], args: argparse.Namespace, device: s
 
     # Soft overlong punishment (DAPO), token-level: a rollout that hit max_new_tokens gets a
     # linearly ramped negative credit on its LAST `truncation_penalty_tail` tokens, reaching
-    # -truncation_penalty at the cap. With `drop`, hitting the cap costs nothing, so on MATH
-    # the student turned wrong answers into unfinished ones (61% of unfinished eval answers
-    # ended in a verbatim loop, in the tail). The early reasoning of a capped rollout is often
-    # sound, so only the tail -- where the loops are -- is penalised. Applied after
-    # whitening, so it is in advantage-std units and is not re-centred away.
+    # -truncation_penalty at the cap. With `drop`, hitting the cap costs nothing, which lets a
+    # student turn wrong answers into unfinished ones (loops in the tail). The early reasoning
+    # of a capped rollout is often sound, so only the tail is penalised. Applied after
+    # whitening, so it is in advantage-std units and is not re-centred away. Off by default.
     if args.truncation_penalty > 0:
         penalised = 0
         for i, r in enumerate(batch):
@@ -337,13 +303,11 @@ def compute_advantages(batch: list[Rollout], args: argparse.Namespace, device: s
         stats["penalised_rollouts"] = penalised
 
     # Answer-span masking: zero credit on the final-answer line and everything after it
-    # (incl. <|im_end|>). Measured on GSM8K: the "#### N" tokens carry the largest reverse
-    # KL of any region (+0.54 vs +0.33 for reasoning) because the stronger teacher can tell
-    # the number is wrong. The student's cheapest fix is to stop committing: in 4 steps it
-    # went from 87% to 27% of rollouts writing "####", the teacher then scored a marker-less
-    # <|im_end|> at +2.07, and capped rollouts rose 13% -> 62%. Masking keeps the teacher's
-    # signal on the reasoning tokens -- the "forking tokens" that carry it -- and removes
-    # the pressure to avoid answering.
+    # (incl. <|im_end|>). The "#### N" tokens carry the largest reverse KL of any region
+    # (~+0.54 vs ~+0.33 for reasoning on GSM8K) because the teacher can tell when the number
+    # is wrong, and the student's cheapest way to lower it is to stop writing answers.
+    # Masking keeps the teacher's signal on the reasoning tokens -- the "forking tokens" that
+    # carry it -- and removes the pressure to avoid answering.
     if args.answer_span_policy == "mask" and tokenizer is not None and answer_style:
         marker = ANSWER_MARKERS.get(answer_style)
         masked = 0
@@ -366,16 +330,14 @@ def optimize_batch(
     `--loss-norm token` (default) normalises by the batch's *total completion tokens*, so
     splitting the batch into micro-batches cannot change the update, and a long rollout
     does not get quietly down-weighted relative to a short one. The flip side: a 2048-token
-    rambling rollout outweighs a 400-token finished one ~5x. `--loss-norm sequence` restores the first version's weighting
-    (per-rollout token mean, averaged over the batch): every rollout counts once. Either
+    rambling rollout outweighs a 400-token finished one ~5x. `--loss-norm sequence` uses the
+    per-rollout token mean, averaged over the batch: every rollout counts once. Either
     way the update is independent of the micro-batch split.
     """
     total_tokens = max(1, sum(int(a.numel()) for a in advantages))
     pad_id = tokenizer.pad_token_id
     diags: list[dict] = []
     loss_total = 0.0
-    k = args.topk_kl
-    topk_sum, topk_n, mass_sum = 0.0, 0, 0.0
 
     for start in range(0, len(batch), args.micro_batch_size):
         chunk = batch[start : start + args.micro_batch_size]
@@ -388,24 +350,11 @@ def optimize_batch(
             input_ids[i, :n] = torch.tensor(r.token_ids, dtype=torch.long, device=device)
             attn[i, :n] = 1
 
-        gather_ids = teacher_topk = None
-        if k:
-            # Teacher top-k ids/log-probs laid out on the log-prob index grid (index i scores
-            # token i+1), so completion token j sits at index prompt_len - 1 + j.
-            gather_ids = torch.zeros((len(chunk), max_len - 1, k), dtype=torch.long, device=device)
-            teacher_topk = torch.zeros((len(chunk), max_len - 1, k), dtype=torch.float32, device=device)
-            for i, r in enumerate(chunk):
-                comp = completion_slice(r.prompt_len, len(r.token_ids))
-                gather_ids[i, comp] = torch.tensor(r.teacher_topk_ids, dtype=torch.long, device=device)
-                teacher_topk[i, comp] = torch.tensor(r.teacher_topk_logp, dtype=torch.float32, device=device)
-
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=device.startswith("cuda")):
-            out = sequence_logprobs_batched(
+            logp_new_all = sequence_logprobs_batched(
                 model, input_ids, attn, with_grad=True,
                 start=min(r.prompt_len for r in chunk) - 1,  # completion span only: see docstring
-                gather_ids=gather_ids,
             )
-        logp_new_all, student_topk = out if k else (out, None)
 
         micro_loss = None
         for i, (r, adv) in enumerate(zip(chunk, chunk_adv)):
@@ -417,14 +366,6 @@ def optimize_batch(
             piece, diag = distill_loss(
                 logp_new, logp_old, adv, clip_ratio=args.clip_ratio, reduction="sum"
             )
-            if k:
-                kl = topk_kl(student_topk[i, comp].float(), teacher_topk[i, comp], args.topk_kl_mode)
-                if r.truncated and args.truncated_policy == "mask" and kl.numel() > 0:
-                    kl = torch.cat([kl[:-1], kl.new_zeros(1)])  # same as the advantage's last token
-                piece = piece + args.topk_kl_weight * kl.sum()
-                topk_sum += float(kl.detach().sum())
-                topk_n += int(kl.numel())
-                mass_sum += float(teacher_topk[i, comp].logsumexp(-1).exp().sum())
             if args.loss_norm == "sequence":
                 # After the `/ total_tokens` below this is piece / (n_tokens_i * batch):
                 # rollout i's token mean, averaged over the batch.
@@ -443,9 +384,6 @@ def optimize_batch(
         "ratio_mean": statistics.fmean(d["ratio_mean"] for d in diags) if diags else 1.0,
         "ratio_max": max((d["ratio_max"] for d in diags), default=1.0),
         "policy_drift": statistics.fmean(d["policy_drift"] for d in diags) if diags else 0.0,
-        # Mean top-k KL per token, and how much of the teacher's probability its top-k holds.
-        **({"topk_kl": topk_sum / max(1, topk_n), "teacher_topk_mass": mass_sum / max(1, topk_n)}
-           if k else {}),
     }
 
 
@@ -543,20 +481,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[rank {local_rank}] dropped {len(pool) - len(short)} of {len(pool)} questions "
               f"longer than {args.max_question_tokens} tokens (MAX_QUESTION_TOKENS)", flush=True)
         pool = short
-    # Teacher-solvable prompts only (HF on-policy-distillation recipe: "correct teacher
-    # completions only"). On a problem the teacher gets wrong, the reverse KL pulls the
-    # student toward the teacher's wrong reasoning.
-    if args.prompt_filter_file:
-        from data import _normalise_for_dedupe
-        solved = {
-            _normalise_for_dedupe(r["question"])
-            for r in map(json.loads, Path(args.prompt_filter_file).read_text().splitlines())
-            if r.get("correct") and r.get("finish_reason") == "stop" and r.get("has_marker")
-        }
-        kept = [q for q in pool if _normalise_for_dedupe(q) in solved]
-        print(f"[rank {local_rank}] PROMPT_FILTER_FILE: kept {len(kept)} of {len(pool)} "
-              f"prompts the teacher solved ({args.prompt_filter_file})", flush=True)
-        pool = kept
     stream = PromptStream(pool, seed=args.seed)
     print(f"[rank {local_rank}] {len(pool)} unique training prompts "
           f"({len(excluded)} eval questions excluded)", flush=True)
@@ -564,19 +488,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[rank {local_rank}] NOTE: {args.steps * args.group_size} rollouts over "
               f"{len(pool)} prompts = {args.steps * args.group_size / len(pool):.1f} "
               f"passes per prompt.", flush=True)
-
-    # Supervised anchor (GKD's (1 - lambda) term): on MATH, on-policy distillation improved
-    # reasoning but eroded finishing (\boxed 69% -> ~49%), while the warm-up kept
-    # finishing but barely moves reasoning. Imitating a few teacher solutions every step is
-    # meant to hold the "conclude and stop" behaviour while the reverse KL does the rest.
-    anchor_examples: list[dict] = []
-    anchor_rng = random.Random(args.seed + 1)
-    if args.sft_anchor_weight > 0:
-        from sft_warmup import completion_nll_sum, load_examples
-        anchor_examples = load_examples(Path(args.sft_anchor_file), tokenizer, 0, args.seed)
-        print(f"[rank {local_rank}] SFT anchor: weight={args.sft_anchor_weight}, "
-              f"{args.sft_anchor_batch} of {len(anchor_examples)} teacher solutions per step",
-              flush=True)
 
     buffer = RolloutBuffer(capacity=args.buffer_capacity, seed=args.seed,
                            max_age=args.buffer_max_age)
@@ -607,21 +518,13 @@ def main(argv: list[str] | None = None) -> int:
         t_gen = time.time()
 
         # 2) score every token with the remote teacher (concurrent requests)
-        teacher_topk = None
-        if args.topk_kl:
-            scored = teacher.score_batch_topk([s.token_ids for s in samples],
-                                              [s.prompt_len for s in samples], args.topk_kl)
-            teacher_logps = [lp for lp, _, _ in scored]
-            teacher_topk = [(ids, lps) for _, ids, lps in scored]
-        else:
-            teacher_logps = teacher.score_batch([s.token_ids for s in samples])
+        teacher_logps = teacher.score_batch([s.token_ids for s in samples])
         t_score = time.time()
 
         # 3) buffer, honouring sampler lag: a vLLM sampler's weights are those of the last
         #    adapter push, so that -- not `step` -- is the policy these rollouts came from.
         policy_step = last_sync_step if _uses_vllm(args) else step
-        rollouts = build_rollouts(samples, teacher_logps, policy_step, args.truncated_policy,
-                                  teacher_topk)
+        rollouts = build_rollouts(samples, teacher_logps, policy_step, args.truncated_policy)
         buffer.extend(rollouts)
         truncated_frac = (
             sum(s.truncated for s in samples) / len(samples) if samples else 0.0
@@ -667,17 +570,6 @@ def main(argv: list[str] | None = None) -> int:
 
         optimizer.zero_grad(set_to_none=True)
         train_diag = optimize_batch(student, tokenizer, batch, advantages, args, device)
-        anchor_nll = None
-        if anchor_examples:
-            # Adds weight x token-mean NLL to the gradient already accumulated above.
-            picks = anchor_rng.sample(anchor_examples, min(args.sft_anchor_batch, len(anchor_examples)))
-            n_tok = sum(len(e["ids"]) - e["prompt_len"] for e in picks)
-            nll_total = 0.0
-            for ex in picks:
-                nll, _ = completion_nll_sum(student, ex, device)
-                (args.sft_anchor_weight * nll / n_tok).backward()
-                nll_total += float(nll)
-            anchor_nll = nll_total / max(1, n_tok)
         grad_norm = torch.nn.utils.clip_grad_norm_(
             [p for p in student.parameters() if p.requires_grad], args.grad_clip
         )
@@ -706,9 +598,6 @@ def main(argv: list[str] | None = None) -> int:
             "clip_frac": round(train_diag["clip_frac"], 4),
             "ratio_mean": round(train_diag["ratio_mean"], 4),
             "policy_drift": round(train_diag["policy_drift"], 5),
-            **({"topk_kl": round(train_diag["topk_kl"], 5),
-                "teacher_topk_mass": round(train_diag["teacher_topk_mass"], 4)}
-               if args.topk_kl else {}),
             "truncated_frac": round(truncated_frac, 3),
             "completion_tokens_mean": round(statistics.fmean(completion_lens), 1),
             "batch": len(batch),
@@ -719,8 +608,6 @@ def main(argv: list[str] | None = None) -> int:
             "sec_score": round(t_score - t_gen, 2),
             "sec_train": round(t_train - t_score, 2),
             **{k: round(v, 4) for k, v in adv_stats.items()},
-            # Teacher-solution NLL under the live student; rising = drifting off the anchor.
-            **({"anchor_nll": round(anchor_nll, 4)} if anchor_nll is not None else {}),
         }
         with metrics_path.open("a") as f:
             f.write(json.dumps(rec) + "\n")

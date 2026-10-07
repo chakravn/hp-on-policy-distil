@@ -1,26 +1,15 @@
 """Prompt sourcing for the distillation trainer.
 
-THE BUG THIS FILE EXISTS TO PREVENT
------------------------------------
-The original trainer built its prompt pool with::
-
-    prompts = load_math_prompts(max(args.group_size * 4, 32))   # -> 32 questions
-    ...
-    q = prompts[(step * args.group_size + i) % len(prompts)]    # cycled
-
-32 unique GSM8K questions, each revisited roughly 50 times over a 200-step run. The
-student memorised 32 problems; the eval used 100 *held-out* test questions, so almost
-nothing transferred. Prompt diversity, not step count, was the tighter of the two limits.
-
-`PromptStream` now draws from the full train split, shuffles once per epoch and never
-repeats a prompt within an epoch.
+PROMPT DIVERSITY
+----------------
+`PromptStream` draws from the full train split (GSM8K: 7,473 problems), shuffles once per
+epoch and never repeats a prompt within an epoch. A small pool that cycles lets the student
+memorise its problems instead of learning anything that transfers to held-out questions.
 
 CONTAMINATION GUARD
 -------------------
 `load_prompt_pool(..., exclude=...)` drops any training prompt whose normalised text also
-appears in the eval set. MATH-500 is a subset of the MATH *test* split so training on MATH
-train is already clean, but the guard is cheap and makes the held-out claim checkable
-rather than assumed.
+appears in the eval set, so the held-out claim is checked rather than assumed.
 """
 
 from __future__ import annotations

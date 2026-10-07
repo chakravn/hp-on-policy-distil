@@ -61,15 +61,20 @@ spec:
             # with OOM ... retrying" at ~22 GiB. Expandable segments let the allocator grow blocks
             # instead of needing one contiguous free chunk.
             - { name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True" }
-          command: ["/bin/bash", "-c"]
+          # args only, no `command`: the PyTorch DLC's ENTRYPOINT runs first and enables CUDA
+          # forward compatibility (its CUDA 13.3 runtime is newer than the node driver).
           args:
-            # peft: LoRA (the default; fp32 full fine-tuning needs far more memory from ~4B up).
-            # bitsandbytes: optional 8-bit Adam (ADAM_8BIT=1).
-            # NOTE: every line below must stay at the SAME indentation. YAML's folded
+            # The image ships PyTorch only. transformers is pinned to the vLLM image's version, so
+            # the trainer runs the same Qwen3.5 model code as the teacher and the sampler.
+            # peft: LoRA. bitsandbytes: only for 8-bit Adam (ADAM_8BIT=1).
+            # NOTE: every line of the script must stay at the SAME indentation. YAML's folded
             # scalar (>) joins equally-indented lines with spaces but preserves a newline
             # before a MORE-indented one, which would split a command in half.
+            - /bin/bash
+            - -c
             - >
-              pip install -q "nvidia-nccl-cu13==2.29.7" "openai>=1.40" "datasets" "peft>=0.11" "bitsandbytes>=0.43" "flash-linear-attention" &&
+              pip install -q "transformers==5.15.1" "peft>=0.11" "datasets" "openai>=1.40" "flash-linear-attention" &&
+              if [ "${ADAM_8BIT}" = 1 ]; then pip install -q "bitsandbytes>=0.43"; fi &&
               until python3 -c "import urllib.request; urllib.request.urlopen('${TEACHER_URL}/models')" 2>/dev/null; do
                 echo "waiting for teacher ${TEACHER_URL} ..."; sleep 15; done &&
               if [ -n "${STUDENT_SAMPLER_URL}" ]; then

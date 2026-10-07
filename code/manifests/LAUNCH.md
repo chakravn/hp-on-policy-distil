@@ -46,8 +46,8 @@ compute-bound, not queue-bound.
 - **Download the teacher** `Qwen/Qwen3.5-9B` (bf16 safetensors, ~18 GiB) into the bucket
   (GUI → HF Download → S3, or the agent). Do the same for the `Qwen/Qwen3.5-2B` student (and `Qwen/Qwen3.5-0.8B` if you baseline it).
 - **Download the bf16 repo**, unquantised. Two quantised routes are closed on this hardware:
-  vLLM can no longer quantise a bf16 checkpoint as it loads (`--quantization bitsandbytes` was how
-  this pipeline used to do it; vLLM removed bitsandbytes from its registry, so that configuration
+  vLLM can no longer quantise a bf16 checkpoint as it loads (`--quantization bitsandbytes`;
+  vLLM removed bitsandbytes from its registry, so that configuration
   fails at pod startup with `Unknown quantization method: bitsandbytes`, and pinning an older image
   does not help because Qwen3.5 support arrived only after the removal), and FP8/W8A8 is *refused*
   on this hardware — A10G is sm_86, the scheme needs sm_89, and the pod dies with `Min capability:
@@ -102,10 +102,9 @@ Three flags are not optional:
   cannot drift. preflight [2] verifies both the method (against the vLLM build's registry) and its
   minimum compute capability.
 
-- `--max-logprobs ${TEACHER_MAX_LOGPROBS}` (≥ 1; 20 for the experimental `TOPK_KL`) — without it, vLLM
-  returns `null` for echo log-probs. That is the failure
-  that produced the original ~6-point result: the client turned nulls into `0.0`, the advantage
-  became `−log π_student` (self-reinforcement), and `teacher_kl` still printed a falling curve.
+- `--max-logprobs 1` — without it, vLLM returns `null` for echo log-probs. Turned into `0.0`,
+  nulls make the advantage `−log π_student` (self-reinforcement) while `teacher_kl` still prints
+  a falling curve.
   `teacher_client.py` now **raises** instead of zeroing, and `preflight.py` check [5] catches it
   before any training starts.
 - `--served-model-name ${TEACHER_MODEL_ID}` — clients must request this exact string.
@@ -129,8 +128,8 @@ python3 src/preflight.py --teacher-url http://localhost:8000/v1
 
 **First, the baseline (~45 min; notebook Part 1).** The trainer starts from the base student, so
 before committing ~4.5 h, measure the teacher and every candidate student on the same problems —
-that is what tells you whether there is anything to distil and which student to pick (GSM8K: 9B
-94.3%, 2B 74.8%, 0.8B 52.0% → the 2B). For one candidate by hand (the sampler must serve it):
+that is what tells you whether there is anything to distil and which student to pick. For one
+candidate by hand (the sampler must serve it):
 
 ```bash
 export STUDENT_MODEL=Qwen/Qwen3.5-2B EVAL_BASE_MODEL=Qwen/Qwen3.5-2B
