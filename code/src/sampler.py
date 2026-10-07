@@ -273,6 +273,22 @@ class VLLMSampler:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(self._generate_one, prompts))
 
+    def served_models(self) -> List[str]:
+        """Model ids the sampler serves: its base model plus any loaded adapters."""
+        return [m.id for m in self.client.models.list().data]
+
+    def assert_serves_base(self) -> None:
+        """The sampler must serve the trainer's student. Otherwise the first adapter push fails
+        inside vLLM with a bare tensor-size mismatch (e.g. a 2B adapter on a 0.8B sampler) --
+        the usual cause is a sampler left on another model by the baseline loop."""
+        served = self.served_models()
+        if self.base_model not in served:
+            raise RuntimeError(
+                f"the student sampler at {self.base_url} serves {served}, but the trainer's "
+                f"student is {self.base_model!r}. Re-apply manifests/student-sampler.yaml-template "
+                f"from the same env_vars as the trainer (STUDENT_MODEL, LORA_R), wait for it, "
+                f"then restart the trainer.")
+
     def sync_adapter(self, path: str) -> None:
         """Load the freshly-saved LoRA adapter into the running server.
 
@@ -282,6 +298,8 @@ class VLLMSampler:
         import urllib.error
         import urllib.request
 
+        if self._adapter_version == 0:
+            self.assert_serves_base()
         version = self._adapter_version + 1
         name = f"{self.ADAPTER_NAME}-{self._run_tag}-{version}"
         path = export_adapter_for_vllm(path, self.base_model)
@@ -294,9 +312,9 @@ class VLLMSampler:
             urllib.request.urlopen(req, timeout=300).read()
         except urllib.error.HTTPError as exc:
             raise RuntimeError(
-                f"vLLM refused the adapter push ({exc.code}): {exc.read()[:500]!r}. "
-                "Start the student sampler with --enable-lora and "
-                "VLLM_ALLOW_RUNTIME_LORA_UPDATING=1."
+                f"vLLM refused the adapter push ({exc.code}): {exc.read()[:500]!r}. The sampler "
+                f"must run --enable-lora with VLLM_ALLOW_RUNTIME_LORA_UPDATING=1, serve "
+                f"{self.base_model!r}, and allow --max-lora-rank >= the adapter's rank."
             ) from exc
         self._adapter_version = version
         self._adapter_loaded = True
