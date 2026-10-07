@@ -7,8 +7,8 @@ marker the scorer looks for). If you change a prompt, you change it once.
 TASK SPECS
 ----------
 `TASK_SPECS` carries one entry per benchmark. Choose the one with real headroom for the
-student: `gsm8k` for a 0.8B or 2B (bases 52% / 75% vs teacher 94%), `math500` for a 4B,
-which scores 93% on GSM8K. `gsm8k_native` is GSM8K in Qwen's zero-shot \boxed{} format.
+student: `gsm8k` for a 0.8B or 2B, `math500` for a 4B (GSM8K leaves it little to gain).
+`gsm8k_native` is GSM8K in Qwen's zero-shot \boxed{} format.
 
 THINKING MODE
 -------------

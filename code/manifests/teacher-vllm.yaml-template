@@ -61,7 +61,7 @@
 # that: at this footprint the binding constraint is prefill compute, not memory.
 #
 # The teacher is the accuracy CEILING -- the student moves toward it and cannot pass it. Run
-# EVAL_PHASE=before,teacher first to measure the gap (on GSM8K: 2B 74.8% vs this 9B 94.3%).
+# EVAL_PHASE=before,teacher first to measure the gap.
 # manifests/env_vars documents the 27B teacher for a higher ceiling (also TP=2, same partition).
 apiVersion: apps/v1
 kind: Deployment

@@ -18,8 +18,8 @@ actually reflects how well distillation worked:
 
 CHOOSING THE TASK AND SAMPLE COUNT
 ----------------------------------
-Pick a task with real headroom for the student: GSM8K for a 0.8B or 2B (bases 52% / 75% vs
-teacher 94%), MATH-500 for a 4B (it scores 93% on GSM8K). Always evaluate the whole test
+Pick a task with real headroom for the student: GSM8K for a 0.8B or 2B, MATH-500 for a 4B (GSM8K
+leaves it little to gain). Always evaluate the whole test
 set -- at n=100 the standard error is ~+-5pp, wider than most distillation gains; at
 GSM8K's n=1319 it is ~+-1.4pp.
 
@@ -338,8 +338,8 @@ def model_args_for(model_ref: str, phase: str, args: argparse.Namespace) -> tupl
     if args.chat_template == "auto":
         # Qwen3.5's template turns thinking OFF only for an explicit `enable_thinking=False`;
         # Inspect passes None when unset, which leaves thinking ON. The model then opens with
-        # "The user wants me to..." and hits max_tokens before any \boxed{} -- ~5% accuracy
-        # for every phase. Pass the same flag train_distill.py builds its prompts with.
+        # "The user wants me to..." and hits max_tokens before any \boxed{} -- near-zero
+        # accuracy for every phase. Pass the same flag train_distill.py builds its prompts with.
         model_args["enable_thinking"] = args.enable_thinking
     if args.chat_template == "raw":
         model_args["chat_template"] = RAW_CHAT_TEMPLATE

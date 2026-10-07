@@ -128,8 +128,8 @@ python3 src/preflight.py --teacher-url http://localhost:8000/v1
 
 **First, the baseline (~45 min; notebook Part 1).** The trainer starts from the base student, so
 before committing ~4.5 h, measure the teacher and every candidate student on the same problems —
-that is what tells you whether there is anything to distil and which student to pick (GSM8K: 9B
-94.3%, 2B 74.8%, 0.8B 52.0% → the 2B). For one candidate by hand (the sampler must serve it):
+that is what tells you whether there is anything to distil and which student to pick. For one
+candidate by hand (the sampler must serve it):
 
 ```bash
 export STUDENT_MODEL=Qwen/Qwen3.5-2B EVAL_BASE_MODEL=Qwen/Qwen3.5-2B

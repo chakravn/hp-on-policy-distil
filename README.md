@@ -3,11 +3,10 @@
 ![Workflow: code to eval dashboard](slides/workflow.png)
 
 Distils **Qwen3.5-9B** into **Qwen3.5-2B** (LoRA rank 128) on GSM8K with on-policy distillation and
-no supervised warm-up. On all 1,319 GSM8K test problems the base 2B scores **74.8%** (greedy); after
-25 steps the distilled 2B scores **89.2% with an 8-vote majority** (**84.0%** greedy), against the
-teacher's **94.3%** (greedy) — 74% of the gap with the vote, 47% greedy against greedy. The workflow starts with a
-**baseline eval** of the teacher and each candidate student (9B 94.3%, 2B 74.8%, 0.8B 52.0%) and picks
-the student from a comparison dashboard: the 0.8B has a wider gap but plateaus at ~65%. Experiment history:
+no supervised warm-up, evaluated on all 1,319 GSM8K test problems: the base student and the teacher
+greedy, the distilled student greedy and with an 8-vote majority. The workflow starts with a
+**baseline eval** of the teacher and each candidate student and picks the student from a comparison
+dashboard. Measured results and experiment history:
 [`code/experiments/`](code/experiments/). A more detailed version of the diagram is in
 [`slides/workflow-detailed.png`](slides/workflow-detailed.png).
 

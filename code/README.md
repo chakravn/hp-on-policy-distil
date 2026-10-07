@@ -5,14 +5,12 @@ Distil a **teacher** (`Qwen/Qwen3.5-9B`, bf16, one whole copy sharded over TP=2)
 rollouts with **dense, per-token feedback** (reverse KL to the teacher). No verifier, no reward
 model and no supervised warm-up. Everything runs on **one `ml.g5.24xlarge`** (4× A10G 24 GB).
 
-**Result** (all 1,319 GSM8K test problems): base 2B **74.8%** greedy → distilled 2B **89.2% with an
-8-vote majority** after 25 steps (**84.0%** greedy) → teacher **94.3%** greedy. With the vote that is
-74% of the gap (z = +11.8; 226 problems fixed, 35 broken); greedy against greedy, 47% (z = +7.45).
-The vote (`EVAL_VOTES=8`, `EVAL_VOTE_PHASES=after`) samples 8 answers at temperature 0.7 and scores
-the most common one; it is a decoding choice, so the dashboards label it. The student was
-chosen by a **baseline eval** first — teacher 94.3%, `Qwen3.5-2B` 74.8%, `Qwen3.5-0.8B` 52.0%: the
-0.8B has the wider gap but plateaus at 64–66% (~30% of it) whatever the schedule. Per-run configs
-and results are in [`experiments/`](experiments/).
+**Evaluation** (all 1,319 GSM8K test problems): the base student and the teacher greedy, the
+distilled student greedy and with an **8-vote majority** (`EVAL_VOTES=8`, `EVAL_VOTE_PHASES=after`:
+8 answers at temperature 0.7, the most common one scored) — a decoding choice, so the dashboards
+label it. The student is chosen by a **baseline eval** first: the strongest candidate that still
+leaves a real gap to the teacher. Per-run configs and measured results are in
+[`experiments/`](experiments/).
 
 **Target cluster:** `hp-cluster-onpolicy-distillation` (instantstart) · EKS, `us-west-2`, ns
 `default`. Storage: **FSx `/fsx` (`fsx-claim`) = high-throughput working store** (HF cache,
@@ -75,7 +73,7 @@ not queue-bound.
 > Two honest costs of the shipped (bf16, TP=2) layout:
 > - **The ceiling.** The teacher is the accuracy *ceiling* — the student moves toward it and cannot
 >   pass it. `headroom_recovered = (after − before) / (teacher − before)`. Run
->   the baseline first to measure the gap (GSM8K: 9B 94.3% vs. 2B 74.8% vs. 0.8B 52.0%).
+>   the baseline first to measure the gap.
 > - **The all-reduce.** TP=2 pays a PCIe all-reduce per prefill layer. On a split-switch pair it
 >   is measurably slower than a same-switch pair, which is why preflight [4] warns.
 >
@@ -104,11 +102,11 @@ not queue-bound.
 the 4-shot prompt (`TRAIN_FEWSHOT=EVAL_FEWSHOT=4`, enforced by preflight [7]) carries the answer
 format. Five settings turned out to be essential, each found by a failed run or the baseline:
 
-- **`LR=2e-5`, `STEPS=50`.** It reaches the plateau by step 25 (84.0%, then 83.9% at 50); on the 0.8B,
-  1e-5 took ~100 steps to the same level and 200 steps did not raise it. At 1e-4 the student collapsed
-  within ~4 steps (capped rollouts 9% → 50–70%).
+- **`LR=2e-5`, `STEPS=50`.** It reaches the plateau by step 25; 1e-5 takes about four times as long
+  to the same level, and more steps do not raise it. At 1e-4 the student collapsed within ~4 steps
+  (capped rollouts 9% → 50–70%).
 - **The 2B student with LoRA r=128** (`LORA_ALPHA=256`). The ceiling is the student's capacity: the
-  0.8B plateaus at ~65%, the 2B at r=32 reached 83.2%, at r=128 84.0%.
+  0.8B plateaus far lower whatever the schedule, and a larger LoRA rank adds little.
 - **`ANSWER_SPAN_POLICY=mask`** — zero credit on the final-answer line and `<|im_end|>`. Those tokens
   carry the largest reverse KL (+0.54 vs. +0.33 for reasoning) because the teacher can tell when
   the number is wrong; without masking the student learns to stop writing answers.
@@ -298,8 +296,8 @@ explicitly: there is no headroom to distil and nothing downstream can create any
 
 **The benchmark is GSM8K, all 1,319 test rows** (`TASK=gsm8k`, `EVAL_LIMIT=1319`), 4-shot,
 greedy, semantic match on the `#### N` answer; the standard error is ~±1.4 pp. `TASK=math500`
-also works and suits a larger (≥4B) student — for the 0.8B it is too hard (~17% of problems solved
-at the training temperature).
+also works and suits a larger (≥4B) student — for the 0.8B it is too hard (most rollouts fail at the
+training temperature).
 
 **Phases carry forward.** `eval_student.py` reuses any phase already in `$EVAL_DIR/summary.json` that
 was recorded with the same eval config, so the notebook measures `before` and `teacher` once in the
@@ -310,8 +308,8 @@ for each checkpoint.
 scores the most common final answer, for the phases in `EVAL_VOTE_PHASES` (default `after`; the
 others stay greedy). Each result records its `decoding`; voted results add `maj_at` (accuracy over
 the first 1..8 votes), `pass_at_k` and `mean_vote_share`, and a phase is only carried forward when
-its decoding matches. The shipped headline votes on the distilled student only — 74.8% greedy base →
-89.2% voted → 94.3% greedy teacher — and every chart labels it; set `EVAL_VOTES=1` for greedy.
+its decoding matches. The shipped headline votes on the distilled student only — greedy base, voted
+distilled student, greedy teacher — and every chart labels it; set `EVAL_VOTES=1` for greedy.
 
 ```bash
 set -a && source manifests/env_vars && set +a
