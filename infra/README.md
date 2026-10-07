@@ -63,7 +63,7 @@ aws cloudformation deploy \
       HyperPodClusterName=hp-cluster-onpolicy-distillation \
       AcceleratedInstanceType=ml.g5.24xlarge \
       AcceleratedInstanceCount=1 \
-      GitRepositoryUrl=https://github.com/chakravn/hp-on-policy-distil \
+      GitRepositoryUrl=<your-git-repo-url> \
       AdminPrincipalArn=arn:aws:iam::<account-id>:role/<your-role>
 ```
 

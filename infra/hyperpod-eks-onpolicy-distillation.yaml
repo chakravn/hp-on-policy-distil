@@ -259,7 +259,6 @@ Parameters:
 
   GitRepositoryUrl:
     Type: String
-    Default: https://github.com/chakravn/hp-on-policy-distil
     AllowedPattern: 'https://.+'
     Description: >-
       HTTPS URL of the Git repository holding the on-policy distillation notebook

@@ -13,8 +13,7 @@ dashboard. Measured results and experiment history:
 Deploy one CloudFormation template, open JupyterLab in SageMaker Studio, run
 `on_policy_distillation.ipynb`. The template creates the HyperPod cluster, the shared
 storage, the observability stack, a Studio domain **and** a JupyterLab space that clones
-[`chakravn/hp-on-policy-distil`](https://github.com/chakravn/hp-on-policy-distil) into
-itself on every start.
+your copy of this repository (`GitRepositoryUrl`) into itself on every start.
 
 | Directory | Contents |
 | --- | --- |
@@ -34,19 +33,10 @@ itself on every start.
    `CreateGrafanaWorkspace=true`. Otherwise pass `CreateGrafanaWorkspace=false`.
 4. **AWS CLI v2** and credentials that can create IAM roles, EKS, SageMaker, FSx, S3,
    CodeBuild and Lambda resources.
-5. **The Git repository must contain the code.** The lifecycle configuration clones
-   whatever is in `GitRepositoryUrl`; cloning an empty repository gives you an empty
-   directory. Push `code/` (or this whole repo) first:
-
-   ```bash
-   cd code
-   git init -b main && git add -A && git commit -m "on-policy distillation"
-   git remote add origin https://github.com/chakravn/hp-on-policy-distil.git
-   git push -u origin main
-   ```
-
-   The lifecycle script looks for `manifests/env_vars` anywhere up to four levels deep,
-   so either layout (repo root = `code/`, or repo root contains `code/`) works.
+5. **A Git repository with this code, reachable over HTTPS.** The lifecycle configuration
+   clones `GitRepositoryUrl` into the space; an empty repository gives you an empty
+   directory. The lifecycle script looks for `manifests/env_vars` anywhere up to four levels
+   deep, so either layout (repo root = `code/`, or repo root contains `code/`) works.
 
 ## Step 1 — Deploy the stack
 
@@ -68,7 +58,7 @@ aws cloudformation deploy \
       HyperPodClusterName=hp-cluster-onpolicy-distillation \
       AcceleratedInstanceType=ml.g5.24xlarge \
       AcceleratedInstanceCount=1 \
-      GitRepositoryUrl=https://github.com/chakravn/hp-on-policy-distil \
+      GitRepositoryUrl=<your-git-repo-url> \
       CreateStudioSpace=true \
       StudioSpaceName=opd-jupyterlab \
       StudioSpaceInstanceType=ml.m5.2xlarge \
@@ -83,7 +73,7 @@ Notebook-related parameters:
 
 | Parameter | Default | What it does |
 | --- | --- | --- |
-| `GitRepositoryUrl` | `https://github.com/chakravn/hp-on-policy-distil` | Repository cloned into the space by the lifecycle configuration, and registered as a code repository in JupyterLab |
+| `GitRepositoryUrl` | *(required)* | HTTPS URL of your copy of this repository: cloned into the space by the lifecycle configuration, and registered as a code repository in JupyterLab |
 | `GitRepositoryBranch` | *(blank)* | Branch to check out; blank clones the default branch |
 | `CreateStudioSpace` | `true` | Create the private JupyterLab space `opd-jupyterlab` owned by the `distillation-researcher` user profile |
 | `StudioSpaceName` | `opd-jupyterlab` | Space name |
@@ -167,7 +157,7 @@ cat > /tmp/space-settings.json <<JSON
   "RemoteAccess": "ENABLED",
   "SpaceStorageSettings": {"EbsStorageSettings": {"EbsVolumeSizeInGb": 100}},
   "JupyterLabAppSettings": {
-    "CodeRepositories": [{"RepositoryUrl": "https://github.com/chakravn/hp-on-policy-distil"}],
+    "CodeRepositories": [{"RepositoryUrl": "<your-git-repo-url>"}],
     "DefaultResourceSpec": {"InstanceType": "ml.m5.2xlarge", "LifecycleConfigArn": "$LCC_ARN"}
   }
 }
@@ -286,7 +276,7 @@ Two caveats for this path:
 
   ```bash
   --lifecycle '{"postStart":{"exec":{"command":["/bin/bash","-lc",
-    "git clone https://github.com/chakravn/hp-on-policy-distil /home/sagemaker-user/hp-on-policy-distil || true"]}}}'
+    "git clone <your-git-repo-url> /home/sagemaker-user/<repo-name> || true"]}}}'
   ```
 
   `lifecycle` is passed through to the workspace container's Kubernetes lifecycle hook;
@@ -300,10 +290,10 @@ whatever you cloned by hand there instead. Open a terminal in JupyterLab
 (**File → New → Terminal**):
 
 ```bash
-ls ~/hp-on-policy-distil          # the cloned repository
+ls ~/<repo-name>                  # the cloned repository
 cat ~/opd-env.sh                  # cluster coordinates, sourced from ~/.bashrc
 tail -30 ~/.opd-lifecycle.log     # what the lifecycle configuration did
-grep -E '^export (CTX|S3_BUCKET|REGION)=' ~/hp-on-policy-distil/manifests/env_vars
+grep -rE '^export (CTX|S3_BUCKET|REGION)=' ~/<repo-name> --include=env_vars
 ```
 
 `~/opd-env.sh` exports `HP_CLUSTER_NAME`, `EKS_CLUSTER_NAME`, `EKS_CLUSTER_ARN`, `CTX`,
@@ -312,14 +302,14 @@ values in `manifests/env_vars` (`CTX`, `S3_BUCKET`, `REGION`) — the original i
 `env_vars.orig`.
 
 If the repository is missing, either the repo was empty at deploy time or the clone failed:
-clone it by hand (`git clone https://github.com/chakravn/hp-on-policy-distil ~/hp-on-policy-distil`)
-or use the JupyterLab git panel, where the repository is already listed. Then re-run the
+clone it by hand (`git clone <your-git-repo-url> ~/<repo-name>`) or use the JupyterLab git
+panel, where the repository is already listed. Then re-run the
 lifecycle script by restarting the space.
 
 ## Step 5 — Run `on_policy_distillation.ipynb`
 
-Open `~/hp-on-policy-distil/on_policy_distillation.ipynb` (or `code/on_policy_distillation.ipynb`,
-depending on your repository layout) and pick the **Python 3 (ipykernel)** kernel.
+Open `on_policy_distillation.ipynb` from the cloned repository (`~/<repo-name>/` or
+`~/<repo-name>/code/`, depending on your repository layout) and pick the **Python 3 (ipykernel)** kernel.
 
 > **JupyterLab spaces hosted on the HyperPod nodes** (created through the `amazon-sagemaker-spaces`
 > add-on) run as a Kubernetes pod and do not receive the Studio execution role, so `aws` and
