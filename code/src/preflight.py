@@ -28,6 +28,8 @@ Checks:
      that decides whether anything runs at all, and getting it wrong shows up as a pod stuck
      Pending forever rather than as an error. As shipped (TP=2 x 1) the partition is
      2 + 1 + 1 = 4 of 4, exactly full.
+  9. the student sampler serves STUDENT_MODEL -- a sampler left on another model (e.g. by
+     the baseline loop) rejects the trainer's adapter with a bare tensor-size mismatch.
 """
 
 from __future__ import annotations
@@ -569,6 +571,27 @@ def check_format_agreement(rep: Report, task: str, fewshot_train: int, fewshot_e
     print(f"        task={task}", flush=True)
 
 
+def check_sampler_model(rep: Report, url: str, student_model: str) -> None:
+    """The rollout sampler must serve the trainer's student, or the first adapter push fails."""
+    print("\n[9] the student sampler serves the trainer's student", flush=True)
+    if not url:
+        rep.ok("no sampler (in-process sampling)")
+        return
+    try:
+        import urllib.request
+        served = [m["id"] for m in json.load(urllib.request.urlopen(f"{url.rstrip('/')}/models",
+                                                                    timeout=30))["data"]]
+    except Exception as exc:  # noqa: BLE001
+        rep.fail(f"cannot list the sampler's models at {url}: {type(exc).__name__}: {exc}")
+        return
+    if student_model in served:
+        rep.ok(f"{student_model!r} is served at {url}")
+    else:
+        rep.fail(f"the sampler serves {served}, not STUDENT_MODEL={student_model!r}: the "
+                 f"trainer's adapter would not fit it. Re-apply "
+                 f"manifests/student-sampler.yaml-template from the same env_vars and wait for it.")
+
+
 def check_node_partition(rep: Report, node_gpus: int, teacher_tp: int, trainer_gpus: int,
                          sampler_gpus: int, sampler_url: str, teacher_replicas: int = 1) -> None:
     """The single-node constraint, as arithmetic.
@@ -680,6 +703,8 @@ def main(argv: list[str] | None = None) -> int:
                            args.max_new_tokens, args.eval_max_tokens, args.enable_thinking)
     check_node_partition(rep, args.node_gpus, args.tp, args.trainer_gpus,
                          args.sampler_gpus, args.sampler_url, args.teacher_replicas)
+    if not args.skip_teacher:
+        check_sampler_model(rep, args.sampler_url, args.student_model)
 
     print(f"\n=== {len(rep.passed)} passed, {len(rep.warnings)} warnings, "
           f"{len(rep.failures)} failures ===", flush=True)
